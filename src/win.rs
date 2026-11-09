@@ -16,28 +16,25 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, LPARAM, RECT,
+    CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, HANDLE, HWND, LPARAM, RECT,
 };
 use windows_sys::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
 };
-use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-    TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateMutexW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    CreateMutexW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
+use windows_sys::Win32::UI::Shell::{CommandLineToArgvW, ShellExecuteW};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowLongW, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
     SetForegroundWindow, SetWindowLongW, SetWindowPos, ShowWindow, SystemParametersInfoW,
     GWL_EXSTYLE, GWL_STYLE, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, SW_HIDE, SW_SHOW,
-    SW_SHOWNOACTIVATE, SW_SHOWNORMAL, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MINIMIZEBOX,
-    WS_SYSMENU,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
+    SW_SHOWNORMAL, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MINIMIZEBOX, WS_SYSMENU,
 };
 use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
 
@@ -52,7 +49,6 @@ const APPX_PACKAGES: &str =
 #[derive(Clone, Debug)]
 pub struct ProcessInfo {
     pub pid: u32,
-    pub exe: String,
     pub cmdline: String,
 }
 
@@ -94,17 +90,14 @@ pub fn query_claude_processes() -> Vec<ProcessInfo> {
     let mut out = Vec::new();
     for pid in claude_pids() {
         if let Some(cmdline) = command_line_of(pid) {
-            out.push(ProcessInfo {
-                pid,
-                exe: String::new(),
-                cmdline,
-            });
+            out.push(ProcessInfo { pid, cmdline });
         }
     }
     out
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct UnicodeString {
     length: u16,
     maximum_length: u16,
@@ -128,11 +121,7 @@ const PROCESS_COMMAND_LINE_INFORMATION: u32 = 60;
 /// `--user-data-dir` a running Claude window belongs to.
 fn command_line_of(pid: u32) -> Option<String> {
     unsafe {
-        let handle = OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
-            0,
-            pid,
-        );
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {
             return None;
         }
@@ -160,37 +149,99 @@ fn command_line_of(pid: u32) -> Option<String> {
             CloseHandle(handle);
             return None;
         }
-        let text = &*(buffer.as_ptr() as *const UnicodeString);
-        let chars = text.length as usize / 2;
-        if chars == 0 {
-            CloseHandle(handle);
-            return None;
-        }
-        let mut wide = vec![0u16; chars];
-        let mut read = 0usize;
-        let ok = ReadProcessMemory(
-            handle,
-            text.buffer as *const c_void,
-            wide.as_mut_ptr() as *mut c_void,
-            text.length as usize,
-            &mut read,
-        );
         CloseHandle(handle);
-        if ok == 0 || read < text.length as usize {
-            // Some builds return the string inline after the UNICODE_STRING header.
-            let offset = std::mem::size_of::<UnicodeString>();
-            let length = text.length as usize;
-            if buffer.len() < offset + length {
+        decode_command_line(buffer.get(..needed as usize)?)
+    }
+}
+
+fn decode_command_line(buffer: &[u8]) -> Option<String> {
+    let header_size = std::mem::size_of::<UnicodeString>();
+    if buffer.len() < header_size {
+        return None;
+    }
+    // Vec<u8> does not guarantee UNICODE_STRING alignment. Copy the header without
+    // creating an unaligned reference, then validate the kernel's inline pointer.
+    let text = unsafe { std::ptr::read_unaligned(buffer.as_ptr().cast::<UnicodeString>()) };
+    let length = usize::from(text.length);
+    let offset = (text.buffer as usize).checked_sub(buffer.as_ptr() as usize)?;
+    if length == 0 || length % 2 != 0 || text.length > text.maximum_length || offset < header_size {
+        return None;
+    }
+    let bytes = buffer.get(offset..offset.checked_add(length)?)?;
+    let wide: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
+        .collect();
+    Some(
+        String::from_utf16_lossy(&wide)
+            .trim_end_matches('\0')
+            .to_owned(),
+    )
+}
+
+fn command_line_args(command: &str) -> Option<Vec<String>> {
+    if command.is_empty() || command.contains('\0') {
+        return None;
+    }
+    let command = to_wide(OsStr::new(command));
+    let mut count = 0;
+    // Use Windows' quoting rules, including paths with spaces and the two forms
+    // `--user-data-dir=path` and `--user-data-dir path`.
+    let args = unsafe { CommandLineToArgvW(command.as_ptr(), &mut count) };
+    if args.is_null() {
+        return None;
+    }
+    let result = unsafe {
+        let result = std::slice::from_raw_parts(args, count as usize)
+            .iter()
+            .map(|arg| {
+                let mut length = 0;
+                while *arg.add(length) != 0 {
+                    length += 1;
+                }
+                String::from_utf16_lossy(std::slice::from_raw_parts(*arg, length))
+            })
+            .collect();
+        LocalFree(args.cast());
+        result
+    };
+    Some(result)
+}
+
+pub fn process_profile_key(command: &str, install: &Install) -> Option<String> {
+    let args = command_line_args(command)?;
+    let executable = crate::data::normalize_key(Path::new(args.first()?));
+    let desktop = executable == crate::data::normalize_key(&install.exe)
+        || (executable.ends_with("\\claude.exe")
+            && (executable.contains("\\windowsapps\\claude_")
+                || executable.contains("\\anthropicclaude\\")
+                || executable.contains("\\programs\\claude\\")));
+    if !desktop
+        || args
+            .iter()
+            .skip(1)
+            .any(|arg| arg == "--type" || arg.starts_with("--type="))
+    {
+        return None;
+    }
+    let mut profile = None;
+    let mut args = args.iter().skip(1);
+    while let Some(arg) = args.next() {
+        let value = if arg == "--user-data-dir" {
+            Some(args.next()?.as_str())
+        } else {
+            arg.strip_prefix("--user-data-dir=")
+        };
+        if let Some(value) = value {
+            if value.is_empty() || !Path::new(value).is_absolute() {
                 return None;
             }
-            wide = buffer[offset..offset + length]
-                .chunks_exact(2)
-                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-                .collect();
+            profile = Some(crate::data::normalize_key(Path::new(value)));
         }
-        let value = String::from_utf16_lossy(&wide);
-        Some(value.trim_end_matches('\0').to_owned())
     }
+    Some(profile.unwrap_or_else(|| crate::data::normalize_key(&install.default_profile)))
 }
 
 /// Store package registration is per-user; the registry points at the versioned
@@ -331,7 +382,7 @@ pub fn apply_window_style(dark: bool) {
     if hwnd.is_null() {
         return;
     }
-    let preference: i32 = DWMWCP_ROUND as i32;
+    let preference: i32 = DWMWCP_ROUND;
     let dark_flag: i32 = if dark { 1 } else { 0 };
     unsafe {
         // A decorations-less egui window is created as a bare popup: no taskbar entry and
@@ -544,8 +595,7 @@ pub fn ime_owns_enter() -> bool {
         let mut sentence: u32 = 0;
         let ok = ImmGetConversionStatus(imc, &mut conversion, &mut sentence);
         ImmReleaseContext(hwnd, imc);
-        ok != 0
-            && (conversion & (IME_CMODE_NATIVE | IME_CMODE_NATIVESYMBOL)) != 0
+        ok != 0 && (conversion & (IME_CMODE_NATIVE | IME_CMODE_NATIVESYMBOL)) != 0
     }
 }
 
@@ -652,7 +702,12 @@ pub fn launch_profile(install: &Install, path: &Path) -> Result<(), String> {
     let mut parameters = OsString::from("--user-data-dir=\"");
     parameters.push(path.as_os_str());
     parameters.push("\"");
-    if shell_execute(install.exe.as_os_str(), Some(&parameters), Some("open"), SW_SHOWNORMAL) {
+    if shell_execute(
+        install.exe.as_os_str(),
+        Some(&parameters),
+        Some("open"),
+        SW_SHOWNORMAL,
+    ) {
         Ok(())
     } else {
         Err("启动 Claude 失败。".into())
@@ -688,6 +743,7 @@ pub fn single_instance() -> bool {
         }
         if GetLastError() == ERROR_ALREADY_EXISTS {
             reveal_main_window();
+            CloseHandle(handle);
             return false;
         }
         // The handle intentionally lives for the whole process; closing it would release
@@ -734,7 +790,7 @@ pub fn set_startup(enable: bool, exe: &Path) -> io::Result<()> {
 pub fn pick_image_file() -> Option<PathBuf> {
     use windows_sys::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OPENFILENAMEW};
 
-    let filter: Vec<u16> = "图片\0*.png;*.jpg;*.jpeg;*.webp\0所有文件\0*.*\0\0"
+    let filter: Vec<u16> = "图片\0*.png;*.jpg;*.jpeg\0所有文件\0*.*\0\0"
         .encode_utf16()
         .collect();
     let title: Vec<u16> = "选择账号头像\0".encode_utf16().collect();
@@ -779,4 +835,119 @@ pub fn pick_image_file() -> Option<PathBuf> {
 
 pub fn current_exe() -> PathBuf {
     std::env::current_exe().unwrap_or_else(|_| PathBuf::from("Claude Account Switcher.exe"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn install() -> Install {
+        Install {
+            kind: InstallKind::Classic,
+            exe: PathBuf::from(r"C:\Custom Claude\Claude.exe"),
+            version: "test".into(),
+            aumid: None,
+            pfn: None,
+            default_profile: PathBuf::from(r"C:\Users\Tester\AppData\Roaming\Claude"),
+        }
+    }
+
+    #[test]
+    fn reads_current_process_command_line_from_native_query() {
+        let command = command_line_of(std::process::id()).expect("query own command line");
+        let executable = std::env::current_exe().unwrap();
+        assert!(command.contains(executable.file_name().unwrap().to_str().unwrap()));
+    }
+
+    #[test]
+    fn command_line_header_and_inline_pointer_are_bounds_checked() {
+        let header_size = std::mem::size_of::<UnicodeString>();
+        for length in 0..header_size {
+            assert!(decode_command_line(&vec![0; length]).is_none());
+        }
+        let wide: Vec<_> = "Claude 中文".encode_utf16().collect();
+        // Deliberately misalign the record to exercise the unaligned header read.
+        let mut bytes = vec![0u8; 1 + header_size + wide.len() * 2];
+        let buffer = &mut bytes[1..];
+        for (dest, source) in buffer[header_size..]
+            .as_chunks_mut::<2>()
+            .0
+            .iter_mut()
+            .zip(&wide)
+        {
+            dest.copy_from_slice(&source.to_le_bytes());
+        }
+        let mut header = UnicodeString {
+            length: (wide.len() * 2) as u16,
+            maximum_length: (wide.len() * 2) as u16,
+            buffer: unsafe { buffer.as_mut_ptr().add(header_size).cast() },
+        };
+        unsafe { std::ptr::write_unaligned(buffer.as_mut_ptr().cast(), header) };
+        assert_eq!(decode_command_line(buffer).as_deref(), Some("Claude 中文"));
+        header.buffer = std::ptr::null_mut();
+        unsafe { std::ptr::write_unaligned(buffer.as_mut_ptr().cast(), header) };
+        assert!(decode_command_line(buffer).is_none());
+        header.buffer = unsafe { buffer.as_mut_ptr().add(buffer.len()).cast() };
+        unsafe { std::ptr::write_unaligned(buffer.as_mut_ptr().cast(), header) };
+        assert!(decode_command_line(buffer).is_none());
+        header.length = 3;
+        header.buffer = unsafe { buffer.as_mut_ptr().add(header_size).cast() };
+        unsafe { std::ptr::write_unaligned(buffer.as_mut_ptr().cast(), header) };
+        assert!(decode_command_line(buffer).is_none());
+    }
+
+    #[test]
+    fn profile_arguments_follow_windows_quoting_rules() {
+        let install = install();
+        let expected = r"c:\users\tester\profile with spaces";
+        for arguments in [
+            r#"--user-data-dir="C:\Users\Tester\Profile With Spaces""#,
+            r#""--user-data-dir=C:\Users\Tester\Profile With Spaces""#,
+            r#"--user-data-dir "C:\Users\Tester\Profile With Spaces""#,
+        ] {
+            let command = format!("\"{}\" {arguments}", install.exe.display());
+            assert_eq!(
+                process_profile_key(&command, &install).as_deref(),
+                Some(expected),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn child_processes_and_unrelated_cli_executables_are_not_profiles() {
+        let install = install();
+        for command in [
+            r#""C:\Custom Claude\Claude.exe" --type=renderer"#,
+            r#""C:\Custom Claude\Claude.exe" --type utility"#,
+            r#""C:\bin\claude.exe" --note="C:\Programs\Claude\""#,
+            r#""C:\Custom Claude\Claude.exe" --user-data-dir"#,
+            r#""C:\Custom Claude\Claude.exe" --user-data-dir=relative"#,
+        ] {
+            assert!(
+                process_profile_key(command, &install).is_none(),
+                "{command}"
+            );
+        }
+        let command = r#""C:\Custom Claude\Claude.exe" --note="--type=renderer""#;
+        assert_eq!(
+            process_profile_key(command, &install),
+            Some(crate::data::normalize_key(&install.default_profile))
+        );
+    }
+
+    #[test]
+    fn aumid_rejects_shell_syntax_and_missing_components() {
+        assert!(valid_aumid("Claude_pzs8sxrjxfjjc!Claude"));
+        for value in [
+            "",
+            "!Claude",
+            "Claude_123!",
+            "Claude!app!other",
+            "Claude!app & other",
+            "Claude!app\0other",
+        ] {
+            assert!(!valid_aumid(value), "{value:?}");
+        }
+    }
 }

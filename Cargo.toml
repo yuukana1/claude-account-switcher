@@ -1,6 +1,6 @@
 [package]
 name = "claude-account-switcher"
-version = "3.0.0"
+version = "3.0.1"
 edition = "2021"
 description = "Portable Claude account switcher for Windows"
 build = "build.rs"
@@ -17,7 +17,7 @@ muda = { version = "0.17", default-features = false }
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_System_Diagnostics_ToolHelp",
-    "Win32_System_Diagnostics_Debug",
+    "Win32_Storage_FileSystem",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Controls_Dialogs",
     "Win32_UI_Input_Ime",

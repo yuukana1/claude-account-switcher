@@ -257,8 +257,8 @@ impl SwitcherApp {
                         });
                         if commit_add {
                             keep_open = false;
-                            next = Dialog::None;
                             self.add_account(ctx, &name);
+                            next = std::mem::replace(&mut self.dialog, Dialog::None);
                         } else if keep_open {
                             next = Dialog::AddAccount { name };
                         }
@@ -280,7 +280,7 @@ impl SwitcherApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(
-                                    "它的目录、保存的登录和快捷方式都会被移除，其他账号不受影响。",
+                                    "这会永久删除该账号目录中的登录信息和本地对话。请先备份需要保留的内容；默认账号不能删除。",
                                 )
                                 .font(ui_font(11.8))
                                 .color(pal.muted),
@@ -422,9 +422,7 @@ impl SwitcherApp {
                                     ui.allocate_exact_size(Vec2::new(64.0, 24.0), Sense::click());
                                 if response.clicked() {
                                     let value = !all;
-                                    for checked in &mut transfer.checked {
-                                        *checked = value;
-                                    }
+                                    transfer.checked.fill(value);
                                 }
                                 let box_rect = Rect::from_center_size(
                                     Pos2::new(all_rect.left() + 8.0, all_rect.center().y),
@@ -794,6 +792,7 @@ impl SwitcherApp {
             // affected by this.
             keep_open = false;
             next = Dialog::None;
+            self.pending_copy = None;
         }
         self.dialog = next;
         if !keep_open {
@@ -803,21 +802,10 @@ impl SwitcherApp {
 }
 
 fn dialog_heading(ui: &mut Ui, title: &str, pal: &Palette) {
-    ui.label(
-        RichText::new(title)
-            .font(display_font(21.0))
-            .color(pal.ink),
-    );
+    ui.label(RichText::new(title).font(display_font(21.0)).color(pal.ink));
 }
 
-fn check_box(
-    ui: &Ui,
-    rect: Rect,
-    checked: bool,
-    partial: bool,
-    t: f32,
-    pal: &Palette,
-) {
+fn check_box(ui: &Ui, rect: Rect, checked: bool, partial: bool, t: f32, pal: &Palette) {
     let painter = ui.painter();
     let fill = mix(pal.surface, pal.accent, t);
     painter.rect_filled(rect, CornerRadius::same(4), fill);

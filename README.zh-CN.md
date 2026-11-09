@@ -20,6 +20,7 @@
 - **额度** — 5 小时 / 每周用量、重置倒计时，临近重置时给出提示。
 - **切换** — 在独立窗口中打开或聚焦账号，并可在账号之间复制 Claude Code 对话。
 - **个性化** — 每个账号可单独设置头像和昵称，支持深色 / 浅色主题。
+- **删除** — 经确认后永久删除选中的非默认账号目录，包括其中的本地对话；请先备份需要保留的内容。
 - **托盘** — 标题栏的 × 只关闭窗口，程序留在通知区；退出在托盘右键菜单里。
 
 ## 运行
@@ -28,15 +29,31 @@
 
 ## 构建
 
+需要 Rust 的 MSVC 工具链，以及包含 C++ 工作负载和 Windows SDK 的 Visual Studio Build Tools。
+
 ```powershell
-cargo build --release --offline
+cargo build --release --locked
 ```
 
 产物：`target\release\claude-account-switcher.exe`。
 
+依赖已缓存时可加 `--offline`；首次构建需要联网下载依赖。
+
+## 开发检查
+
+```powershell
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+```
+
+测试使用临时目录和模拟账号数据，不会修改真实 Claude 配置、登录账号、启动 Claude 或修改开机启动项。GitHub Actions 会在 Windows 上执行这些检查并构建可执行文件。
+
 ## 数据与安全
 
-只读取 Claude 的配置与设置。唯一会写入的是你主动发起的对话复制，以及切换器自己的设置和头像；不会删除账号或对话，也不发起任何网络请求。
+程序读取 Claude 的配置与设置，不主动发起网络请求。添加账号会创建独立配置目录并启动 Claude。主动发起的对话复制会写入新的索引文件，不覆盖已存在的副本，也不修改源文件。确认删除后，会永久移除选中的非默认账号目录及其中的本地对话；默认账号不能删除。
+
+切换器自己的设置和头像会先完整写入临时文件，再替换目标文件。保存失败会提示错误并保留原文件。已有设置文件无法读取或解析时，程序会保留它；请修复文件后重新启动，再保存设置。
 
 Anthropic Sans/Serif 字体从本机已安装的 Claude 中提取，不随程序分发。
 

@@ -3,6 +3,8 @@ fn main() {
     {
         println!("cargo:rerun-if-changed=assets/icon.ico");
         println!("cargo:rerun-if-changed=assets/app.rc");
-        let _ = embed_resource::compile("assets/app.rc", embed_resource::NONE);
+        embed_resource::compile("assets/app.rc", embed_resource::NONE)
+            .manifest_optional()
+            .expect("failed to compile Windows resources");
     }
 }

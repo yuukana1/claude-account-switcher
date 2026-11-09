@@ -20,6 +20,7 @@ Two accounts running side by side:
 - **Usage** — live 5-hour / weekly usage, reset countdown, and a warning shortly before a reset.
 - **Switching** — opens or focuses an account in its own window, and copies Claude Code conversations between accounts.
 - **Personal** — avatar and nickname per account; light and dark themes.
+- **Removal** — permanently removes a selected non-default profile after confirmation, including its local conversations. Back up anything you need first.
 - **Tray** — the titlebar × only closes the window; the app stays in the notification area. Quit lives in the tray menu.
 
 ## Run
@@ -28,15 +29,31 @@ Two accounts running side by side:
 
 ## Build
 
+Requires Rust's MSVC toolchain and Visual Studio Build Tools with the C++ workload and Windows SDK.
+
 ```powershell
-cargo build --release --offline
+cargo build --release --locked
 ```
 
 Output: `target\release\claude-account-switcher.exe`.
 
+Add `--offline` if the dependencies are already cached. A fresh build needs to download them once.
+
+## Development checks
+
+```powershell
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+```
+
+Tests use temporary directories and synthetic profile data. They do not change your Claude profiles, sign in, launch Claude or modify startup entries. GitHub Actions runs these checks and builds the executable on Windows.
+
 ## Data & safety
 
-The app reads Claude's profiles and settings. It writes only the conversation copies you start, plus its own settings and avatars. It never deletes an account or a conversation and makes no network requests.
+The app reads Claude's profiles and settings and makes no network requests. Adding an account creates a separate profile directory and launches Claude. Explicit conversation copies write new index files without overwriting existing copies; the source stays unchanged. Confirming removal permanently deletes the selected non-default profile directory and its local conversations. The default account cannot be removed.
+
+The switcher's settings and avatars are saved by replacing a complete temporary file. Failed saves are reported and leave the previous file intact. If an existing settings file cannot be read or parsed, it is preserved; repair it and restart the switcher before saving changes.
 
 Anthropic Sans/Serif are extracted locally from the installed Claude app and are not bundled.
 

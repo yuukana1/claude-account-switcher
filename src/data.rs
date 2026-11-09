@@ -1,8 +1,8 @@
 //! Read-only view of everything Claude and the old switcher left on this machine:
 //! install location, profiles, Claude Code conversation index files, and usage history.
 //!
-//! Nothing in this module deletes or rewrites profile data. The only writes are the
-//! settings file (through `Settings`) and an explicit conversation copy in `copy_session`.
+//! Profile writes are limited to an explicit conversation copy in `copy_session` and
+//! confirmed removal of a non-default profile in `delete_account_dir`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::env;
@@ -84,7 +84,7 @@ pub struct Paths {
 pub fn paths() -> Paths {
     let local = env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
-        .unwrap_or_else(|| env::temp_dir());
+        .unwrap_or_else(env::temp_dir);
     let roaming = env::var_os("APPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| local.clone());
@@ -195,7 +195,10 @@ fn find_msix() -> Option<Install> {
 
 fn find_classic() -> Option<Install> {
     let mut dirs: Vec<PathBuf> = Vec::new();
-    for hive in [winreg::enums::HKEY_CURRENT_USER, winreg::enums::HKEY_LOCAL_MACHINE] {
+    for hive in [
+        winreg::enums::HKEY_CURRENT_USER,
+        winreg::enums::HKEY_LOCAL_MACHINE,
+    ] {
         for view in [
             winreg::enums::KEY_WOW64_64KEY,
             winreg::enums::KEY_WOW64_32KEY,
@@ -268,7 +271,11 @@ fn find_exe_shallow(dir: &Path, depth: u32) -> Option<PathBuf> {
     let mut dirs = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_file() && path.file_name().is_some_and(|n| n.eq_ignore_ascii_case("Claude.exe")) {
+        if path.is_file()
+            && path
+                .file_name()
+                .is_some_and(|n| n.eq_ignore_ascii_case("Claude.exe"))
+        {
             return Some(path);
         }
         if path.is_dir() {
@@ -407,7 +414,12 @@ pub fn refresh_metadata(install: &Install, account: &mut Account) {
     let roots = profile_data_roots(install, account);
     let mut newest: Option<SystemTime> = None;
     for root in &roots {
-        for name in ["Preferences", "Local State", "config.json", "window-state.json"] {
+        for name in [
+            "Preferences",
+            "Local State",
+            "config.json",
+            "window-state.json",
+        ] {
             if let Ok(meta) = fs::metadata(root.join(name)) {
                 if let Ok(stamp) = meta.modified() {
                     newest = Some(newest.map_or(stamp, |n| n.max(stamp)));
@@ -495,7 +507,10 @@ pub fn count_sessions(install: &Install, account: &Account) -> usize {
                     for entry in entries.flatten() {
                         let name = entry.file_name();
                         let text = name.to_string_lossy();
-                        if text.starts_with("local_") && text.ends_with(".json") {
+                        if entry.path().is_file()
+                            && text.starts_with("local_")
+                            && text.ends_with(".json")
+                        {
                             names.insert(name);
                         }
                     }
@@ -555,16 +570,26 @@ pub fn list_sessions(install: &Install, account: &Account) -> Vec<Session> {
                     if !path.is_file() || !text.starts_with("local_") || !text.ends_with(".json") {
                         continue;
                     }
-                    let data = fs::read_to_string(&path)
-                        .ok()
-                        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+                    let data = fs::read_to_string(&path).ok().and_then(|text| {
+                        serde_json::from_str::<Value>(text.trim_start_matches('\u{feff}')).ok()
+                    });
                     let title = data
                         .as_ref()
-                        .and_then(|v| first_string(v, &["title", "name", "summary", "customTitle", "displayName"]))
+                        .and_then(|v| {
+                            first_string(
+                                v,
+                                &["title", "name", "summary", "customTitle", "displayName"],
+                            )
+                        })
                         .unwrap_or_else(|| fallback_title(&text));
                     let folder = data
                         .as_ref()
-                        .and_then(|v| first_string(v, &["cwd", "workingDirectory", "projectPath", "folder", "path"]))
+                        .and_then(|v| {
+                            first_string(
+                                v,
+                                &["cwd", "workingDirectory", "projectPath", "folder", "path"],
+                            )
+                        })
                         .map(|p| folder_label(&p))
                         .unwrap_or_default();
                     let stem = path
@@ -601,7 +626,7 @@ pub fn list_sessions(install: &Install, account: &Account) -> Vec<Session> {
         }
     }
     let mut list: Vec<Session> = found.into_values().collect();
-    list.sort_by(|a, b| b.updated.cmp(&a.updated));
+    list.sort_by_key(|session| std::cmp::Reverse(session.updated));
     list
 }
 
@@ -651,8 +676,7 @@ fn folder_label(path: &str) -> String {
         return "(no folder)".into();
     }
     path.split(['\\', '/'])
-        .filter(|part| !part.is_empty())
-        .next_back()
+        .rfind(|part| !part.is_empty())
         .unwrap_or("")
         .to_owned()
 }
@@ -703,21 +727,31 @@ pub fn copy_session(session: &Session, store: &SessionStore) -> io::Result<bool>
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "session has no file name"))?;
     let dest = store.path.join(name);
-    if dest.exists() {
+    if dest.try_exists()? {
         return Ok(false);
     }
     let text = fs::read_to_string(&session.file)?;
-    let text = text
-        .replace(
-            &format!("\"{}\"", session.account),
-            &format!("\"{}\"", store.account),
-        )
-        .replace(
-            &format!("\"{}\"", session.org),
-            &format!("\"{}\"", store.org),
-        );
-    fs::write(&dest, text)?;
-    Ok(true)
+    let mut data: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let object = data.as_object_mut().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "session must be a JSON object")
+    })?;
+    // These are index metadata fields. A title, message, transcript or path may
+    // contain exactly the same strings and must not be rewritten.
+    for (key, source, target) in [
+        ("account", &session.account, &store.account),
+        ("org", &session.org, &store.org),
+    ] {
+        if object.get(key).and_then(Value::as_str) == Some(source.as_str()) {
+            object.insert(key.to_owned(), Value::String(target.clone()));
+        }
+    }
+    let bytes = serde_json::to_vec_pretty(&data).map_err(io::Error::other)?;
+    match crate::storage::write_atomic(&dest, &bytes, false) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 // ----------------------------------------------------------------- usage ----
@@ -760,12 +794,9 @@ impl Usage {
         let Some(anchor) = self.sd_anchor else {
             return (self.sd, "—".into());
         };
-        let week = chrono::Duration::days(7);
-        let mut last = anchor;
-        while last + week <= now {
-            last += week;
-        }
-        let next = last + week;
+        let Some((last, next)) = weekly_window(anchor, now) else {
+            return (self.sd, "—".into());
+        };
         if self.updated <= last {
             (
                 Some(0),
@@ -775,6 +806,20 @@ impl Usage {
             (self.sd, format_reset_hint(next, now))
         }
     }
+}
+
+/// Advance old weekly history in constant time, with checked date arithmetic.
+pub fn weekly_window(
+    anchor: DateTime<Local>,
+    now: DateTime<Local>,
+) -> Option<(DateTime<Local>, DateTime<Local>)> {
+    let weeks = (now - anchor)
+        .num_seconds()
+        .div_euclid(7 * 24 * 3600)
+        .max(0);
+    let last = anchor.checked_add_signed(chrono::Duration::weeks(weeks))?;
+    let next = last.checked_add_signed(chrono::Duration::weeks(1))?;
+    Some((last, next))
 }
 
 pub fn read_usage(install: &Install, account: &Account) -> Option<Usage> {
@@ -793,15 +838,27 @@ pub fn read_usage(install: &Install, account: &Account) -> Option<Usage> {
 
     let mut samples: Vec<(i64, String, Option<i64>, Option<i64>)> = Vec::new();
     for item in raw {
-        let t = item.get("t").and_then(Value::as_i64);
+        let Some(t) = item
+            .get("t")
+            .and_then(Value::as_i64)
+            .filter(|t| from_ms(*t).is_some())
+        else {
+            continue;
+        };
         let u = item.get("u");
-        let fh = u.and_then(|u| u.get("fh")).and_then(Value::as_i64);
-        let sd = u.and_then(|u| u.get("sd")).and_then(Value::as_i64);
-        if t.is_none() || (fh.is_none() && sd.is_none()) {
+        let fh = u
+            .and_then(|u| u.get("fh"))
+            .and_then(Value::as_i64)
+            .filter(|n| (0..=100).contains(n));
+        let sd = u
+            .and_then(|u| u.get("sd"))
+            .and_then(Value::as_i64)
+            .filter(|n| (0..=100).contains(n));
+        if fh.is_none() && sd.is_none() {
             continue;
         }
         samples.push((
-            t.unwrap(),
+            t,
             item.get("org")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
@@ -810,11 +867,15 @@ pub fn read_usage(install: &Install, account: &Account) -> Option<Usage> {
             sd,
         ));
     }
-    if samples.is_empty() {
-        return None;
+    samples.sort_by_key(|sample| sample.0);
+    // Historical samples from another organization must not determine the current
+    // account's reset window or graph, even if they contain a more recent drop.
+    let org = samples.last()?.1.clone();
+    if !org.is_empty() {
+        samples.retain(|sample| sample.1 == org);
     }
 
-    let last = samples.last().unwrap();
+    let last = samples.last()?;
     let mut reset_idx: Option<usize> = None;
     for i in (1..samples.len()).rev() {
         let prev = &samples[i - 1];
@@ -847,9 +908,9 @@ pub fn read_usage(install: &Install, account: &Account) -> Option<Usage> {
             }
         }
     }
-    let fh_reset_at = fh_start.map(|start| {
-        round_to_minutes(start + chrono::Duration::hours(5), 5)
-    });
+    let fh_reset_at = fh_start
+        .and_then(|start| start.checked_add_signed(chrono::Duration::hours(5)))
+        .map(|reset| round_to_minutes(reset, 5));
 
     let mut sd_anchor: Option<DateTime<Local>> = None;
     for i in (1..samples.len()).rev() {
@@ -919,11 +980,10 @@ fn round_to_minutes(time: DateTime<Local>, minutes: i64) -> DateTime<Local> {
         .and_hms_opt(0, 0, 0)
         .or_else(|| Some(NaiveDateTime::new(naive.date(), chrono::NaiveTime::MIN)))
         .expect("midnight always exists");
-    let rounded = base + chrono::Duration::seconds(floored);
-    Local
-        .from_local_datetime(&rounded)
-        .single()
-        .unwrap_or(time)
+    let Some(rounded) = base.checked_add_signed(chrono::Duration::seconds(floored)) else {
+        return time;
+    };
+    Local.from_local_datetime(&rounded).single().unwrap_or(time)
 }
 
 pub fn format_reset_hint(time: DateTime<Local>, now: DateTime<Local>) -> String {
@@ -959,7 +1019,11 @@ impl ResetInfo {
         } else if minutes < 24 * 60 {
             format!("{} 小时 {} 分", minutes / 60, minutes % 60)
         } else {
-            format!("{} 天 {} 小时", minutes / (24 * 60), (minutes % (24 * 60)) / 60)
+            format!(
+                "{} 天 {} 小时",
+                minutes / (24 * 60),
+                (minutes % (24 * 60)) / 60
+            )
         }
     }
 }
@@ -979,13 +1043,10 @@ pub fn next_reset(usage: &Usage, now: DateTime<Local>) -> Option<ResetInfo> {
             }
         }
     }
-    if let Some(anchor) = usage.sd_anchor {
-        let week = chrono::Duration::days(7);
-        let mut last = anchor;
-        while last + week <= now {
-            last += week;
-        }
-        let next = last + week;
+    if let Some((_, next)) = usage
+        .sd_anchor
+        .and_then(|anchor| weekly_window(anchor, now))
+    {
         candidates.push(ResetInfo {
             label: "本周",
             at: next,
@@ -997,7 +1058,8 @@ pub fn next_reset(usage: &Usage, now: DateTime<Local>) -> Option<ResetInfo> {
         .min_by_key(|candidate| candidate.minutes)
 }
 
-pub fn format_when(when: DateTime<Local>) -> String {    let now = Local::now();
+pub fn format_when(when: DateTime<Local>) -> String {
+    let now = Local::now();
     let delta = now - when;
     let minutes = delta.num_minutes();
     if minutes < 1 {
@@ -1048,12 +1110,18 @@ pub fn next_account_name(existing: &[Account]) -> String {
     "新账号".into()
 }
 
-pub fn validate_label(name: &str, accounts: &[Account], except_id: Option<&str>) -> Result<(), String> {
+pub fn validate_label(
+    name: &str,
+    accounts: &[Account],
+    except_id: Option<&str>,
+) -> Result<(), String> {
     let name = name.trim();
     if name.is_empty() {
         return Err("名称不能为空。".into());
     }
-    if name.chars().any(|c| matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|')) {
+    if name.chars().any(|c| {
+        c.is_control() || matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+    }) {
         return Err("名称不能包含 \\ / : * ? \" < > |".into());
     }
     if name.starts_with('.') || name.ends_with('.') || name.ends_with(' ') {
@@ -1062,21 +1130,29 @@ pub fn validate_label(name: &str, accounts: &[Account], except_id: Option<&str>)
     if name.chars().count() > 40 {
         return Err("名称过长（最多 40 个字符）。".into());
     }
-    let upper = name.to_ascii_uppercase();
-    let reserved = ["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5",
-        "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6",
-        "LPT7", "LPT8", "LPT9"];
+    let upper = name
+        .split('.')
+        .next()
+        .unwrap_or(name)
+        .trim_end()
+        .to_ascii_uppercase();
+    let reserved = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
     if reserved.contains(&upper.as_str()) {
         return Err(format!("'{name}' 是 Windows 保留名称。"));
     }
-    if name == "Add account" {
+    if name.eq_ignore_ascii_case("Add account") {
         return Err("'Add account' 是保留名称，请换一个。".into());
     }
     for account in accounts {
         if Some(account.id.as_str()) == except_id {
             continue;
         }
-        if account.id == name || account.name == name {
+        if account.id.to_lowercase() == name.to_lowercase()
+            || account.name.to_lowercase() == name.to_lowercase()
+        {
             return Err(format!("已存在名为 '{name}' 的账号。"));
         }
     }
@@ -1084,36 +1160,60 @@ pub fn validate_label(name: &str, accounts: &[Account], except_id: Option<&str>)
 }
 
 pub fn delete_account_dir(account: &Account) -> io::Result<()> {
-    if account.is_default {
+    delete_account_dir_in(account, &paths())
+}
+
+fn delete_account_dir_in(account: &Account, paths: &Paths) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    if account.is_default || account.id.eq_ignore_ascii_case(DEFAULT_ID) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "默认账号不能删除。",
         ));
     }
-    let local = paths().local;
-    let profiles = paths().profiles;
+    let local = &paths.local;
+    let profiles = &paths.profiles;
     let current = local.join(format!("{PROFILE_PREFIX}{}", account.id));
     let legacy = profiles.join(&account.id);
-    let path = if current.join("config.json").is_file() || !legacy.is_dir() {
-        current
-    } else {
-        legacy
-    };
-    let leaf = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let parent = path.parent().map(normalize_key).unwrap_or_default();
-    let ours = (parent == normalize_key(&local) && leaf == format!("{PROFILE_PREFIX}{}", account.id))
-        || (parent == normalize_key(&profiles) && leaf == account.id);
-    if !ours || account.id.starts_with('.') || account.id.contains(['\\', '/']) {
+    // Use the path the user selected; do not resolve it again after confirmation.
+    let path = &account.path;
+    let is_current = normalize_key(path) == normalize_key(&current);
+    let is_legacy = normalize_key(path) == normalize_key(&legacy);
+    if (!is_current && !is_legacy)
+        || account.id.is_empty()
+        || account.id.starts_with('.')
+        || account.id.ends_with(['.', ' '])
+        || account.id.chars().any(|c| {
+            c.is_control() || matches!(c, '\\' | '/' | ':' | '"' | '<' | '>' | '|' | '*' | '?')
+        })
+    {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!("拒绝删除 '{}'。", path.display()),
         ));
     }
-    if !path.exists() {
-        return Ok(());
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let base = fs::canonicalize(local)?;
+    let expected_parent = if is_current {
+        base
+    } else {
+        base.join("ClaudeProfiles")
+    };
+    let resolved = fs::canonicalize(path)?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || !metadata.is_dir()
+        || resolved.parent().map(normalize_key) != Some(normalize_key(&expected_parent))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "拒绝删除链接或允许目录之外的账号数据。",
+        ));
     }
     fs::remove_dir_all(path)
 }
@@ -1121,7 +1221,288 @@ pub fn delete_account_dir(account: &Account) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestDir;
     use chrono::Duration;
+    use serde_json::json;
+
+    fn account_at(path: PathBuf) -> Account {
+        Account {
+            id: "Secondary".into(),
+            name: "Secondary".into(),
+            path,
+            is_default: false,
+            color: 0,
+            running_pid: None,
+            last_used: None,
+            session_count: 0,
+            data_path: None,
+        }
+    }
+
+    fn install_at(root: &Path) -> Install {
+        Install {
+            kind: InstallKind::Classic,
+            exe: root.join("Claude.exe"),
+            version: "test".into(),
+            aumid: None,
+            pfn: None,
+            default_profile: root.to_path_buf(),
+        }
+    }
+
+    fn test_paths(root: &Path) -> Paths {
+        let local = root.join("Local");
+        let profiles = local.join("ClaudeProfiles");
+        fs::create_dir_all(&profiles).unwrap();
+        Paths {
+            local,
+            roaming: root.join("Roaming"),
+            switcher: profiles.join(".switcher"),
+            settings: profiles.join("settings.json"),
+            profiles,
+        }
+    }
+
+    fn session_at(file: PathBuf) -> Session {
+        Session {
+            file,
+            account: "source-account".into(),
+            org: "source-org".into(),
+            title: "Test".into(),
+            folder: String::new(),
+            updated: UNIX_EPOCH,
+            archived: false,
+        }
+    }
+
+    #[test]
+    fn session_copy_changes_only_metadata_and_preserves_content_and_source() {
+        let dir = TestDir::new();
+        let session = session_at(dir.path().join("local_example.json"));
+        let target = dir.path().join("target");
+        fs::create_dir(&target).unwrap();
+        let store = SessionStore {
+            path: target,
+            account: "source-org".into(),
+            org: "target-org".into(),
+        };
+        let original = json!({
+            "account": session.account, "org": session.org, "title": session.account,
+            "summary": session.org, "sessionId": "source-account",
+            "path": "C:\\source-account\\work",
+            "messages": [{"account": "source-account", "content": "source-org", "text": "中文"}],
+        });
+        let original_text = format!("\u{feff}{original}");
+        fs::write(&session.file, &original_text).unwrap();
+        assert!(copy_session(&session, &store).unwrap());
+        let output: Value =
+            serde_json::from_slice(&fs::read(store.path.join("local_example.json")).unwrap())
+                .unwrap();
+        let mut expected = original;
+        expected["account"] = json!(store.account);
+        expected["org"] = json!(store.org);
+        assert_eq!(output, expected);
+        assert_eq!(fs::read_to_string(&session.file).unwrap(), original_text);
+    }
+
+    #[test]
+    fn session_copy_never_replaces_an_existing_conversation() {
+        let dir = TestDir::new();
+        let session = session_at(dir.path().join("local_existing.json"));
+        let target = dir.path().join("target");
+        fs::create_dir(&target).unwrap();
+        let store = SessionStore {
+            path: target,
+            account: "target-account".into(),
+            org: "target-org".into(),
+        };
+        let destination = store.path.join("local_existing.json");
+        fs::write(&destination, b"existing content").unwrap();
+        // Even a source that disappeared since opening the dialog cannot affect it.
+        assert!(!copy_session(&session, &store).unwrap());
+        assert_eq!(fs::read(destination).unwrap(), b"existing content");
+    }
+
+    #[test]
+    fn invalid_session_json_is_not_published() {
+        let dir = TestDir::new();
+        let session = session_at(dir.path().join("local_invalid.json"));
+        let target = dir.path().join("target");
+        fs::create_dir(&target).unwrap();
+        let store = SessionStore {
+            path: target,
+            account: "target-account".into(),
+            org: "target-org".into(),
+        };
+        for text in ["{truncated", "[]", "\u{feff}null"] {
+            fs::write(&session.file, text).unwrap();
+            assert_eq!(
+                copy_session(&session, &store).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(fs::read_dir(&store.path).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn session_list_accepts_bom_and_does_not_count_directories_as_sessions() {
+        let dir = TestDir::new();
+        let install = install_at(dir.path());
+        let account = account_at(dir.path().to_path_buf());
+        let org = dir
+            .path()
+            .join("claude-code-sessions")
+            .join("account")
+            .join("org");
+        fs::create_dir_all(org.join("local_directory.json")).unwrap();
+        fs::write(
+            org.join("local_example.json"),
+            "\u{feff}{\"title\":\"中文对话\",\"cwd\":\"C:\\\\work\\\\repo\"}",
+        )
+        .unwrap();
+        fs::write(
+            org.join("archived-sessions.idx"),
+            "{\"archived\":[\"local_example\"]}",
+        )
+        .unwrap();
+        assert_eq!(count_sessions(&install, &account), 1);
+        let sessions = list_sessions(&install, &account);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].title, "中文对话");
+        assert_eq!(sessions[0].folder, "repo");
+        assert!(sessions[0].archived);
+    }
+
+    #[test]
+    fn deletion_uses_the_selected_profile_and_preserves_its_alternate() {
+        let dir = TestDir::new();
+        let paths = test_paths(dir.path());
+        let account = account_at(paths.local.join("ClaudeProfile-Secondary"));
+        let legacy = paths.profiles.join("Secondary");
+        fs::create_dir_all(&account.path).unwrap();
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("config.json"), b"legacy login").unwrap();
+        fs::write(account.path.join("data"), b"selected profile").unwrap();
+        delete_account_dir_in(&account, &paths).unwrap();
+        assert!(!account.path.exists());
+        assert_eq!(
+            fs::read(legacy.join("config.json")).unwrap(),
+            b"legacy login"
+        );
+    }
+
+    #[test]
+    fn deletion_allows_a_legacy_profile_inside_local_appdata() {
+        let dir = TestDir::new();
+        let paths = test_paths(dir.path());
+        let account = account_at(paths.profiles.join("Secondary"));
+        fs::create_dir(&account.path).unwrap();
+        fs::write(account.path.join("data"), b"selected profile").unwrap();
+        delete_account_dir_in(&account, &paths).unwrap();
+        assert!(!account.path.exists());
+        assert!(paths.profiles.is_dir());
+    }
+
+    #[test]
+    fn deletion_rejects_default_traversal_and_unrelated_paths() {
+        let dir = TestDir::new();
+        let paths = test_paths(dir.path());
+        let outside = dir.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("keep"), b"keep").unwrap();
+        let mut account = account_at(outside.clone());
+        assert!(delete_account_dir_in(&account, &paths).is_err());
+        account.id = "default".into();
+        account.path = paths.profiles.join("default");
+        assert!(delete_account_dir_in(&account, &paths).is_err());
+        account.id = "..\\outside".into();
+        account.path = paths.profiles.join(&account.id);
+        assert!(delete_account_dir_in(&account, &paths).is_err());
+        assert_eq!(fs::read(outside.join("keep")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn deletion_checks_resolved_parent_even_when_lexical_path_is_allowed() {
+        let dir = TestDir::new();
+        let mut paths = test_paths(dir.path());
+        // Simulate an allowed legacy parent resolving outside LocalAppData.
+        paths.profiles = dir.path().join("external-profiles");
+        let account = account_at(paths.profiles.join("Secondary"));
+        fs::create_dir_all(&account.path).unwrap();
+        fs::write(account.path.join("keep"), b"keep").unwrap();
+        assert_eq!(
+            delete_account_dir_in(&account, &paths).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(fs::read(account.path.join("keep")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn labels_reject_windows_aliases_controls_and_case_collisions() {
+        let accounts = vec![account_at(PathBuf::from("unused"))];
+        for name in [
+            "con.txt",
+            "NUL.log",
+            "COM1.txt",
+            "lpt9.backup",
+            "line\nbreak",
+            "nul\0byte",
+            "secondary",
+        ] {
+            assert!(validate_label(name, &accounts, None).is_err(), "{name:?}");
+        }
+        assert!(validate_label("工作账号", &accounts, None).is_ok());
+        assert!(validate_label("secondary", &accounts, Some("Secondary")).is_ok());
+    }
+
+    #[test]
+    fn usage_sorts_samples_and_isolates_the_current_organization() {
+        let dir = TestDir::new();
+        let install = install_at(dir.path());
+        let account = account_at(dir.path().to_path_buf());
+        let base = Local::now().timestamp_millis() - 10 * 3600 * 1000;
+        let samples = json!({"samples": [
+            {"t": base + 3000, "org": "current", "u": {"fh": 45, "sd": 80}},
+            {"t": base, "org": "other", "u": {"fh": 90, "sd": 90}},
+            {"t": base + 1000, "org": "other", "u": {"fh": 0, "sd": 0}},
+            {"t": base + 2000, "org": "current", "u": {"fh": 40, "sd": 75}},
+        ]});
+        fs::write(
+            dir.path().join("plan-usage-history.json"),
+            samples.to_string(),
+        )
+        .unwrap();
+        let usage = read_usage(&install, &account).unwrap();
+        assert_eq!(usage.t, base + 3000);
+        assert_eq!(usage.fh, Some(45));
+        assert_eq!(usage.chart.len(), 2);
+        assert!(usage.fh_reset_at.is_none());
+        assert!(usage.sd_anchor.is_none());
+    }
+
+    #[test]
+    fn usage_ignores_invalid_timestamps_and_percentages() {
+        let dir = TestDir::new();
+        let install = install_at(dir.path());
+        let account = account_at(dir.path().to_path_buf());
+        let now = Local::now().timestamp_millis();
+        let samples = json!({"samples": [
+            {"t": i64::MIN, "u": {"fh": 100}},
+            {"t": now, "u": {"fh": 20, "sd": 30}},
+            {"t": now + 1, "u": {"fh": i64::MIN, "sd": 101}},
+            {"t": i64::MAX, "u": {"fh": 1}},
+        ]});
+        fs::write(
+            dir.path().join("plan-usage-history.json"),
+            samples.to_string(),
+        )
+        .unwrap();
+        let usage = read_usage(&install, &account).unwrap();
+        assert_eq!(usage.t, now);
+        assert_eq!(usage.chart.len(), 1);
+        assert_eq!(usage.fh, Some(20));
+        assert_eq!(usage.sd, Some(30));
+    }
 
     fn usage_with(fh_reset: DateTime<Local>, sd_anchor: DateTime<Local>) -> Usage {
         Usage {
@@ -1136,6 +1517,21 @@ mod tests {
             sd_anchor: Some(sd_anchor),
             chart: Vec::new(),
         }
+    }
+
+    #[test]
+    fn weekly_history_advances_across_many_periods_and_exact_boundaries() {
+        let now = Local::now();
+        for weeks in [0, 1, 10, 100_000] {
+            let anchor = now - Duration::weeks(weeks);
+            let (last, next) = weekly_window(anchor, now).unwrap();
+            assert_eq!(last, now);
+            assert_eq!(next, now + Duration::weeks(1));
+        }
+        let anchor = now - Duration::days(20);
+        let (last, next) = weekly_window(anchor, now).unwrap();
+        assert_eq!(last, now - Duration::days(6));
+        assert_eq!(next, now + Duration::days(1));
     }
 
     #[test]

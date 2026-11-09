@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
@@ -12,9 +13,10 @@ use crate::data::Install;
 pub const DEFAULT_ID: &str = "Default";
 
 pub struct Settings {
-    pub value: Value,
-    pub path: PathBuf,
+    value: Value,
+    path: PathBuf,
     dirty: bool,
+    load_error: Option<String>,
 }
 
 impl Settings {
@@ -23,52 +25,63 @@ impl Settings {
         // with `Get-Content`; keeping the BOM is what stops PowerShell 5.1 from decoding
         // the Chinese account names as ANSI. A retry covers a concurrent rewrite.
         let mut value = Value::Object(Map::new());
+        let mut load_error = None;
         for attempt in 0..3 {
-            let parsed = fs::read_to_string(&path)
-                .ok()
-                .map(|s| s.trim_start_matches('\u{feff}').to_owned())
-                .and_then(|s| serde_json::from_str::<Value>(&s).ok());
-            if let Some(parsed) = parsed {
-                if parsed.is_object() {
+            let parsed = fs::read_to_string(&path).and_then(|text| {
+                let parsed: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                if !parsed.is_object() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "settings must be a JSON object",
+                    ));
+                }
+                Ok(parsed)
+            });
+            match parsed {
+                Ok(parsed) => {
                     value = parsed;
+                    load_error = None;
                     break;
                 }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    load_error = None;
+                    break;
+                }
+                Err(error) => load_error = Some(error.to_string()),
             }
             if attempt < 2 {
                 std::thread::sleep(std::time::Duration::from_millis(40));
             }
         }
-        let value = if value.is_object() {
-            value
-        } else {
-            Value::Object(Map::new())
-        };
         Self {
             value,
             path,
             dirty: false,
+            load_error,
         }
     }
 
-    pub fn save(&mut self) {
+    pub fn save(&mut self) -> io::Result<()> {
+        if let Some(error) = &self.load_error {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "无法读取设置 {}：{error}。原文件已保留，请修复文件后重新启动。",
+                    self.path.display()
+                ),
+            ));
+        }
         if !self.dirty {
-            return;
+            return Ok(());
         }
         if let Some(parent) = self.path.parent() {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent)?;
         }
-        if let Ok(text) = serde_json::to_string_pretty(&self.value) {
-            let text = format!("\u{feff}{text}");
-            let tmp = self.path.with_extension("json.tmp");
-            let result = fs::write(&tmp, text.as_bytes())
-                .and_then(|_| fs::rename(&tmp, &self.path));
-            if result.is_err() {
-                // Fallback for a locked target; still write the BOM so PowerShell reads it.
-                let _ = fs::write(&self.path, text.as_bytes());
-                let _ = fs::remove_file(&tmp);
-            }
-            self.dirty = false;
-        }
+        let text = serde_json::to_string_pretty(&self.value).map_err(io::Error::other)?;
+        crate::storage::write_atomic(&self.path, format!("\u{feff}{text}").as_bytes(), true)?;
+        self.dirty = false;
+        Ok(())
     }
 
     fn object(&self, key: &str) -> Option<&Map<String, Value>> {
@@ -307,5 +320,83 @@ impl Settings {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::TestDir;
+    use serde_json::json;
+
+    #[test]
+    fn save_preserves_unknown_keys_and_bom_with_unicode_labels() {
+        let dir = TestDir::new();
+        let path = dir.path().join("settings.json");
+        let original = json!({"FutureFeature": {"enabled": true, "values": [1, "原值"]}});
+        fs::write(&path, format!("\u{feff}{original}")).unwrap();
+        let mut settings = Settings::load(path.clone());
+        settings.set_label("Secondary", Some("  工作账号  "));
+        settings.set_theme("dark");
+        settings.save().unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert!(bytes.starts_with(&[0xef, 0xbb, 0xbf]));
+        let reloaded = Settings::load(path);
+        assert_eq!(reloaded.label_for("Secondary").as_deref(), Some("工作账号"));
+        assert_eq!(reloaded.theme_pref(), "dark");
+        assert_eq!(reloaded.value["FutureFeature"], original["FutureFeature"]);
+    }
+
+    #[test]
+    fn malformed_existing_settings_are_never_replaced_with_defaults() {
+        for original in ["{truncated", "[]", "null", "\u{feff}invalid"] {
+            let dir = TestDir::new();
+            let path = dir.path().join("settings.json");
+            fs::write(&path, original).unwrap();
+            let mut settings = Settings::load(path.clone());
+            settings.set_theme("dark");
+            let error = settings.save().unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn failed_save_keeps_changes_dirty_for_retry_after_unlocking() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = TestDir::new();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, "{\"Theme\":\"light\"}").unwrap();
+        let mut settings = Settings::load(path.clone());
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
+        settings.set_theme("dark");
+        assert!(settings.save().is_err());
+        assert!(settings.dirty);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"Theme\":\"light\"}");
+        drop(lock);
+        settings.save().unwrap();
+        assert!(!settings.dirty);
+        assert_eq!(Settings::load(path).theme_pref(), "dark");
+    }
+
+    #[test]
+    fn missing_settings_are_created_only_after_a_change() {
+        let dir = TestDir::new();
+        let path = dir.path().join("nested").join("settings.json");
+        let mut settings = Settings::load(path.clone());
+        settings.save().unwrap();
+        assert!(!path.exists());
+        settings.set_last_account("Secondary");
+        settings.save().unwrap();
+        assert_eq!(
+            Settings::load(path).last_account().as_deref(),
+            Some("Secondary")
+        );
     }
 }

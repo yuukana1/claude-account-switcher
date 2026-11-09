@@ -50,7 +50,13 @@ pub fn display_name_from_email(email: &str) -> String {
     let local = email.split('@').next().unwrap_or(email);
     let cleaned: String = local
         .chars()
-        .map(|c| if c == '.' || c == '_' || c == '-' { ' ' } else { c })
+        .map(|c| {
+            if c == '.' || c == '_' || c == '-' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
     let mut out = String::new();
     for word in cleaned.split_whitespace() {
@@ -127,9 +133,7 @@ fn is_email(value: &str) -> bool {
         && !value.contains(' ')
         && !value.contains('\\')
         && !value.contains('/')
-        && value
-            .chars()
-            .all(|c| c.is_ascii_graphic() && c != '"')
+        && value.chars().all(|c| c.is_ascii_graphic() && c != '"')
 }
 
 fn is_uuid(value: &str) -> bool {
@@ -152,8 +156,7 @@ fn is_user_id(value: &str) -> bool {
 fn is_human_name(value: &str) -> bool {
     let value = value.trim().trim_matches(['"', '\'', '\u{0}']);
     let count = value.chars().count();
-    count >= 2
-        && count <= 40
+    (2..=40).contains(&count)
         && !value.contains('@')
         && !value.contains('\\')
         && !value.contains('/')
@@ -176,7 +179,7 @@ pub fn identity_from_profile(roots: &[PathBuf]) -> Option<Identity> {
         let idb = root.join("IndexedDB");
         let mut blobs: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
         collect_blobs(&idb, 0, &mut blobs);
-        blobs.sort_by(|a, b| b.0.cmp(&a.0));
+        blobs.sort_by_key(|blob| std::cmp::Reverse(blob.0));
         for (_, path) in blobs {
             let Ok(bytes) = fs::read(&path) else {
                 continue;
@@ -221,15 +224,42 @@ fn collect_blobs(dir: &Path, depth: usize, out: &mut Vec<(std::time::SystemTime,
 }
 
 /// Avatar the user picked, stored next to the switcher's own files.
-pub fn custom_avatar_path(account_id: &str) -> Option<PathBuf> {
-    let base = avatar_dir()?;
-    for ext in ["png", "jpg", "jpeg"] {
-        let path = base.join(format!("{}.{ext}", safe_name(account_id)));
-        if path.is_file() {
-            return Some(path);
+pub fn custom_avatar_path(account_id: &str, allow_legacy: bool) -> Option<PathBuf> {
+    avatar_paths(account_id, allow_legacy)
+        .into_iter()
+        .find(|path| path.is_file())
+}
+
+pub fn avatar_paths(account_id: &str, allow_legacy: bool) -> Vec<PathBuf> {
+    let Some(base) = avatar_dir() else {
+        return Vec::new();
+    };
+    let mut stems = vec![avatar_stem(account_id)];
+    if allow_legacy {
+        stems.push(legacy_avatar_stem(account_id));
+    }
+    stems
+        .into_iter()
+        .flat_map(|stem| ["png", "jpg", "jpeg"].map(|ext| base.join(format!("{stem}.{ext}"))))
+        .collect()
+}
+
+/// Escape punctuation instead of mapping it all to `_`, which made distinct
+/// accounts such as `work-main`, `work main` and `work_main` share an avatar.
+pub fn avatar_stem(id: &str) -> String {
+    use std::fmt::Write;
+
+    let mut result = String::from("avatar-");
+    for ch in id.chars() {
+        if ch.is_alphanumeric() || matches!(ch, '-' | '_') {
+            result.push(ch);
+        } else {
+            for byte in ch.encode_utf8(&mut [0; 4]).bytes() {
+                write!(&mut result, "%{byte:02X}").expect("write to String");
+            }
         }
     }
-    None
+    result
 }
 
 pub fn avatar_dir() -> Option<PathBuf> {
@@ -242,8 +272,34 @@ pub fn avatar_dir() -> Option<PathBuf> {
     )
 }
 
-fn safe_name(id: &str) -> String {
+pub fn legacy_avatar_stem(id: &str) -> String {
     id.chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn avatar_names_keep_punctuation_distinct_and_cannot_escape_the_directory() {
+        let ids = [
+            "work-main",
+            "work main",
+            "work_main",
+            "work%20main",
+            "../work",
+            "工作账号",
+        ];
+        let names: std::collections::HashSet<_> = ids.map(avatar_stem).into_iter().collect();
+        assert_eq!(names.len(), ids.len());
+        assert!(names
+            .iter()
+            .all(|name| !name.contains(['/', '\\', ':', '.'])));
+        assert_eq!(
+            legacy_avatar_stem("work-main"),
+            legacy_avatar_stem("work main")
+        );
+    }
 }

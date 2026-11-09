@@ -438,14 +438,7 @@ pub fn avatar_tint(index: usize, pal: &Palette) -> Color32 {
 
 // ---------------------------------------------------------------- shapes ----
 
-pub fn soft_shadow(
-    painter: &Painter,
-    rect: Rect,
-    radius: u8,
-    blur: f32,
-    dy: f32,
-    alpha: u8,
-) {
+pub fn soft_shadow(painter: &Painter, rect: Rect, radius: u8, blur: f32, dy: f32, alpha: u8) {
     if alpha == 0 {
         return;
     }
@@ -524,8 +517,7 @@ pub fn starburst(painter: &Painter, center: Pos2, radius: f32, color: Color32) {
     let width = (radius * 0.108).max(1.1);
     let rays = 12;
     for i in 0..rays {
-        let angle =
-            -std::f32::consts::FRAC_PI_2 + i as f32 / rays as f32 * std::f32::consts::TAU;
+        let angle = -std::f32::consts::FRAC_PI_2 + i as f32 / rays as f32 * std::f32::consts::TAU;
         let dir = Vec2::new(angle.cos(), angle.sin());
         let p0 = center + dir * inner;
         let p1 = center + dir * outer;
@@ -612,7 +604,11 @@ pub fn circle_image(
     }
     painter.add(Shape::mesh(mesh));
     if ring_width > 0.0 {
-        painter.circle_stroke(center, radius - ring_width * 0.5, Stroke::new(ring_width, ring));
+        painter.circle_stroke(
+            center,
+            radius - ring_width * 0.5,
+            Stroke::new(ring_width, ring),
+        );
     }
 }
 
@@ -622,7 +618,10 @@ pub fn icon_arrow_right(painter: &Painter, rect: Rect, color: Color32) {
     let r = rect.shrink(rect.width() * 0.31);
     let c = rect.center();
     let stroke = Stroke::new(1.6, color);
-    painter.line_segment([Pos2::new(r.left(), c.y), Pos2::new(r.right(), c.y)], stroke);
+    painter.line_segment(
+        [Pos2::new(r.left(), c.y), Pos2::new(r.right(), c.y)],
+        stroke,
+    );
     painter.line_segment(
         [
             Pos2::new(c.x + r.width() * 0.10, c.y - r.height() * 0.30),
@@ -801,7 +800,8 @@ pub fn icon_folder(painter: &Painter, rect: Rect, color: Color32) {
     );
 }
 
-pub fn icon_chat(painter: &Painter, rect: Rect, color: Color32) {    let r = rect.shrink(rect.width() * 0.16);
+pub fn icon_chat(painter: &Painter, rect: Rect, color: Color32) {
+    let r = rect.shrink(rect.width() * 0.16);
     painter.rect_stroke(
         r,
         CornerRadius::same(4),
@@ -825,7 +825,8 @@ pub fn icon_chat(painter: &Painter, rect: Rect, color: Color32) {    let r = rec
     );
 }
 
-pub fn icon_sun(painter: &Painter, rect: Rect, color: Color32) {    let c = rect.center();
+pub fn icon_sun(painter: &Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
     let r = rect.width() * 0.19;
     painter.circle_stroke(c, r, Stroke::new(1.4, color));
     let stroke = Stroke::new(1.4, color);
@@ -866,8 +867,7 @@ pub fn icon_moon(painter: &Painter, rect: Rect, color: Color32) {
 // ------------------------------------------------------------------- text ----
 
 pub fn truncate(ctx: &egui::Context, text: &str, font: &FontId, max_width: f32) -> String {
-    let galley =
-        ctx.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), font.clone(), Color32::WHITE));
+    let galley = ctx.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), font.clone(), Color32::WHITE));
     if galley.size().x <= max_width {
         return text.to_owned();
     }
@@ -875,7 +875,7 @@ pub fn truncate(ctx: &egui::Context, text: &str, font: &FontId, max_width: f32) 
     let mut lo = 0usize;
     let mut hi = chars.len();
     while lo < hi {
-        let mid = (lo + hi + 1) / 2;
+        let mid = (lo + hi).div_ceil(2);
         let probe: String = chars[..mid].iter().collect::<String>() + "…";
         let w = ctx
             .fonts_mut(|f| f.layout_no_wrap(probe, font.clone(), Color32::WHITE))
@@ -936,8 +936,7 @@ fn procedural_icon_rgba(size: u32) -> Vec<u8> {
     let rays = 12;
     let dirs: Vec<(f32, f32)> = (0..rays)
         .map(|i| {
-            let a =
-                -std::f32::consts::FRAC_PI_2 + i as f32 / rays as f32 * std::f32::consts::TAU;
+            let a = -std::f32::consts::FRAC_PI_2 + i as f32 / rays as f32 * std::f32::consts::TAU;
             (a.cos(), a.sin())
         })
         .collect();
@@ -1033,8 +1032,7 @@ pub fn starburst_rgba(size: u32) -> Vec<u8> {
     let rays = 12;
     let dirs: Vec<(f32, f32)> = (0..rays)
         .map(|i| {
-            let a =
-                -std::f32::consts::FRAC_PI_2 + i as f32 / rays as f32 * std::f32::consts::TAU;
+            let a = -std::f32::consts::FRAC_PI_2 + i as f32 / rays as f32 * std::f32::consts::TAU;
             (a.cos(), a.sin())
         })
         .collect();

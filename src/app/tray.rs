@@ -77,7 +77,11 @@ impl SwitcherApp {
             signature.push('|');
             signature.push_str(&account.name);
             signature.push('|');
-            signature.push(if account.running_pid.is_some() { '1' } else { '0' });
+            signature.push(if account.running_pid.is_some() {
+                '1'
+            } else {
+                '0'
+            });
             signature.push(';');
         }
         signature.push_str(if self.startup { "boot1" } else { "boot0" });

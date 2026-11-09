@@ -14,9 +14,7 @@ use eframe::egui;
 use serde_json::{json, Value};
 
 use crate::anim::Blend;
-use crate::data::{
-    self, paths, Account, Install, Session, Usage, DEFAULT_ID,
-};
+use crate::data::{self, paths, Account, Install, Session, Usage, DEFAULT_ID};
 use crate::identity::{self, Identity};
 use crate::settings::Settings;
 use crate::theme;
@@ -24,7 +22,7 @@ use crate::win::{self, ProcessInfo};
 
 pub const WINDOW_W: f32 = 1000.0;
 pub const WINDOW_H: f32 = 624.0;
-pub const APP_VERSION: &str = "3.0.0";
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
@@ -162,6 +160,7 @@ pub struct SwitcherApp {
     next_full_query: Instant,
 
     next_meta: Instant,
+    next_identity: Instant,
     next_watch: Instant,
     started: Instant,
     pub time: f32,
@@ -172,6 +171,7 @@ pub struct SwitcherApp {
     pub quit: bool,
     styled: bool,
     pub tray_hint_pending: bool,
+    settings_error: Option<String>,
 }
 
 impl SwitcherApp {
@@ -202,7 +202,7 @@ impl SwitcherApp {
         for account in &mut accounts {
             data::refresh_metadata(&install, account);
         }
-        settings.save();
+        let settings_error = settings.save().err().map(|error| error.to_string());
 
         let selected_id = settings
             .last_account()
@@ -223,15 +223,10 @@ impl SwitcherApp {
         let now = Instant::now();
 
         let texture = |size: u32, name: &str, rgba: Vec<u8>| {
-            let image = egui::ColorImage::from_rgba_unmultiplied(
-                [size as usize, size as usize],
-                &rgba,
-            );
-            cc.egui_ctx.load_texture(
-                name.to_owned(),
-                image,
-                egui::TextureOptions::LINEAR,
-            )
+            let image =
+                egui::ColorImage::from_rgba_unmultiplied([size as usize, size as usize], &rgba);
+            cc.egui_ctx
+                .load_texture(name.to_owned(), image, egui::TextureOptions::LINEAR)
         };
         let logo_large = texture(128, "logo-large", theme::icon_rgba(128));
         let logo_small = texture(48, "logo-small", theme::icon_rgba(48));
@@ -272,6 +267,7 @@ impl SwitcherApp {
             next_poll: now,
             next_full_query: now,
             next_meta: now,
+            next_identity: now + Duration::from_secs(30),
             next_watch: now + Duration::from_secs(60),
             started: now,
             time: 0.0,
@@ -281,6 +277,7 @@ impl SwitcherApp {
             quit: false,
             styled: false,
             tray_hint_pending: false,
+            settings_error,
         };
 
         app.refresh_usage(false);
@@ -304,6 +301,10 @@ impl SwitcherApp {
 
     // ------------------------------------------------------------ selection ----
 
+    fn save_settings(&mut self) {
+        self.settings_error = self.settings.save().err().map(|error| error.to_string());
+    }
+
     pub fn selected(&self) -> Option<&Account> {
         self.accounts.iter().find(|a| a.id == self.selected_id)
     }
@@ -318,7 +319,7 @@ impl SwitcherApp {
         }
         self.selected_id = id.clone();
         self.settings.set_last_account(&id);
-        self.settings.save();
+        self.save_settings();
         self.refresh_usage(true);
         ctx.request_repaint();
     }
@@ -331,9 +332,7 @@ impl SwitcherApp {
     }
 
     pub fn usage_name(&self) -> String {
-        self.selected()
-            .map(|a| a.name.clone())
-            .unwrap_or_default()
+        self.selected().map(|a| a.name.clone()).unwrap_or_default()
     }
 
     // ---------------------------------------------------------------- data ----
@@ -360,8 +359,8 @@ impl SwitcherApp {
         // The periodic meta refresh runs every few seconds. Kicking a 900 ms burst of
         // full-rate repaints on every tick would burn a core while the user is just
         // looking at the window, so only animate when the numbers really moved.
-        let moved = (fh - self.bar_fh.target).abs() > 0.004
-            || (sd - self.bar_sd.target).abs() > 0.004;
+        let moved =
+            (fh - self.bar_fh.target).abs() > 0.004 || (sd - self.bar_sd.target).abs() > 0.004;
         if switched {
             // Coming from another account, grow the meters from zero instead of sliding
             // from a stranger's numbers.
@@ -383,10 +382,7 @@ impl SwitcherApp {
         let mut accounts = data::discover_accounts(&self.install, &mut self.settings);
         for account in &mut accounts {
             data::refresh_metadata(&self.install, account);
-            account.running_pid = self
-                .proc_map
-                .get(&data::running_key(account))
-                .copied();
+            account.running_pid = self.proc_map.get(&data::running_key(account)).copied();
         }
         let keep = accounts.iter().any(|a| a.id == self.selected_id);
         if !keep {
@@ -396,7 +392,12 @@ impl SwitcherApp {
                 .unwrap_or_else(|| DEFAULT_ID.to_owned());
         }
         self.accounts = accounts;
-        self.settings.save();
+        self.identity
+            .retain(|id, _| self.accounts.iter().any(|account| &account.id == id));
+        self.avatar_textures
+            .retain(|id, _| self.accounts.iter().any(|account| &account.id == id));
+        self.load_identities_in(Some(ctx));
+        self.save_settings();
         self.refresh_usage(false);
         self.rebuild_tray();
         ctx.request_repaint();
@@ -411,14 +412,14 @@ impl SwitcherApp {
     }
 
     /// Reads each account's e-mail and any locally chosen avatar. Both are cached; the
-    /// IndexedDB read is skipped once an address has been found.
+    /// IndexedDB reads are refreshed periodically so a new login replaces stale identity.
     pub fn load_identities(&mut self) {
         self.load_identities_in(None);
     }
 
     fn load_identities_in(&mut self, ctx: Option<&egui::Context>) {
         for account in &self.accounts {
-            if self.identity.contains_key(&account.id) {
+            if self.identity.get(&account.id).is_some_and(Option::is_some) {
                 continue;
             }
             let roots = data::profile_data_roots(&self.install, account);
@@ -432,7 +433,9 @@ impl SwitcherApp {
             if self.avatar_textures.contains_key(&account.id) {
                 continue;
             }
-            let Some(path) = identity::custom_avatar_path(&account.id) else {
+            let Some(path) =
+                identity::custom_avatar_path(&account.id, self.legacy_avatar_unique(&account.id))
+            else {
                 continue;
             };
             let name = format!("avatar-{}", account.id);
@@ -475,41 +478,58 @@ impl SwitcherApp {
         }
     }
 
-    pub fn set_custom_avatar(&mut self, account_id: &str, source: &std::path::Path, ctx: &egui::Context) {
+    fn legacy_avatar_unique(&self, id: &str) -> bool {
+        let legacy = identity::legacy_avatar_stem(id).to_lowercase();
+        self.accounts
+            .iter()
+            .filter(|account| identity::legacy_avatar_stem(&account.id).to_lowercase() == legacy)
+            .count()
+            == 1
+    }
+
+    pub fn set_custom_avatar(
+        &mut self,
+        account_id: &str,
+        source: &std::path::Path,
+        ctx: &egui::Context,
+    ) {
         let Some(dir) = identity::avatar_dir() else {
             return;
         };
-        if std::fs::create_dir_all(&dir).is_err() {
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            self.show_message("头像保存失败", error.to_string(), Tone::Error);
             return;
         }
-        let safe: String = account_id
-            .chars()
-            .map(|c| if c.is_alphanumeric() { c } else { '_' })
-            .collect();
-        let target = dir.join(format!("{safe}.png"));
+        let target = dir.join(format!("{}.png", identity::avatar_stem(account_id)));
         // Re-encode through the image crate so oversized phone photos stay small and any
         // format the dialog accepted ends up as a PNG.
-        let Ok(bytes) = std::fs::read(source) else {
-            self.show_message("头像读取失败", "无法读取所选文件。", Tone::Error);
-            return;
-        };
-        let Ok(image) = image::load_from_memory(&bytes) else {
-            self.show_message("头像不可用", "请选择 PNG 或 JPEG 图片。", Tone::Error);
+        let Ok(image) = read_avatar_image(source) else {
+            self.show_message("头像不可用", "请选择可读取的 PNG 或 JPEG 图片（边长不超过 16384 像素，解码内存不超过 256 MiB）。", Tone::Error);
             return;
         };
         let thumb = image.resize_to_fill(256, 256, image::imageops::FilterType::Lanczos3);
-        if thumb.save(&target).is_err() {
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        if thumb
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .is_err()
+            || crate::storage::write_atomic(&target, encoded.get_ref(), true).is_err()
+        {
             self.show_message("头像保存失败", "无法写入头像文件。", Tone::Error);
             return;
         }
-        for ext in ["jpg", "jpeg"] {
-            let _ = std::fs::remove_file(dir.join(format!("{safe}.{ext}")));
+        for path in identity::avatar_paths(account_id, self.legacy_avatar_unique(account_id)) {
+            if path != target {
+                let _ = std::fs::remove_file(path);
+            }
         }
         self.avatar_textures.remove(account_id);
-        let name = format!("avatar-{account_id}-{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0));
+        let name = format!(
+            "avatar-{account_id}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
         if let Some(texture) = load_avatar_texture(ctx, &target, name) {
             self.avatar_textures.insert(account_id.to_owned(), texture);
         }
@@ -518,13 +538,12 @@ impl SwitcherApp {
     }
 
     pub fn clear_custom_avatar(&mut self, account_id: &str, ctx: &egui::Context) {
-        if let Some(dir) = identity::avatar_dir() {
-            let safe: String = account_id
-                .chars()
-                .map(|c| if c.is_alphanumeric() { c } else { '_' })
-                .collect();
-            for ext in ["png", "jpg", "jpeg"] {
-                let _ = std::fs::remove_file(dir.join(format!("{safe}.{ext}")));
+        for path in identity::avatar_paths(account_id, self.legacy_avatar_unique(account_id)) {
+            if let Err(error) = std::fs::remove_file(path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    self.show_message("头像删除失败", error.to_string(), Tone::Error);
+                    return;
+                }
             }
         }
         self.avatar_textures.remove(account_id);
@@ -549,31 +568,11 @@ impl SwitcherApp {
     }
 
     fn apply_processes(&mut self, list: Vec<ProcessInfo>) {
-        let default_key = data::normalize_key(&self.install.default_profile);
         let mut map: HashMap<String, u32> = HashMap::new();
         for process in list {
-            let command = process.cmdline.to_lowercase();
-            if command.is_empty() || command.contains("--type=") {
-                continue;
+            if let Some(key) = win::process_profile_key(&process.cmdline, &self.install) {
+                map.entry(key).or_insert(process.pid);
             }
-            let desktop = command.contains("\\windowsapps\\claude_")
-                || command.contains("\\anthropicclaude\\")
-                || command.contains("\\programs\\claude\\");
-            if !desktop {
-                continue;
-            }
-            let key = if let Some(pos) = command.find("--user-data-dir=") {
-                let rest = &command[pos + "--user-data-dir=".len()..];
-                let value = if let Some(stripped) = rest.strip_prefix('"') {
-                    stripped.split('"').next().unwrap_or_default()
-                } else {
-                    rest.split_whitespace().next().unwrap_or_default()
-                };
-                data::normalize_key(std::path::Path::new(value))
-            } else {
-                default_key.clone()
-            };
-            map.entry(key).or_insert(process.pid);
         }
         self.proc_map = map;
         let mut changed = false;
@@ -639,8 +638,14 @@ impl SwitcherApp {
             };
 
             let prev_t = prev.get("T").and_then(Value::as_i64).unwrap_or(0);
-            let prev_fh = prev.get("Fh").and_then(Value::as_i64);
-            let prev_sd = prev.get("Sd").and_then(Value::as_i64);
+            let prev_fh = prev
+                .get("Fh")
+                .and_then(Value::as_i64)
+                .filter(|n| (0..=100).contains(n));
+            let prev_sd = prev
+                .get("Sd")
+                .and_then(Value::as_i64)
+                .filter(|n| (0..=100).contains(n));
             let prev_org = prev.get("Org").and_then(Value::as_str).unwrap_or_default();
             let mut fh_notice_at = prev.get("FhNoticeAt").and_then(Value::as_i64);
             let mut sd_notice_at = prev.get("SdNoticeAt").and_then(Value::as_i64);
@@ -676,8 +681,10 @@ impl SwitcherApp {
                     (Some(cur), Some(old)) => cur <= 5 && cur <= old - 5,
                     _ => false,
                 };
-                let recent_fh = fh_notice_at.is_some_and(|t| now_ms - t < 45 * 60 * 1000);
-                let recent_sd = sd_notice_at.is_some_and(|t| now_ms - t < 2 * 60 * 60 * 1000);
+                let recent_fh = fh_notice_at
+                    .is_some_and(|t| (0..45 * 60 * 1000).contains(&now_ms.saturating_sub(t)));
+                let recent_sd = sd_notice_at
+                    .is_some_and(|t| (0..2 * 60 * 60 * 1000).contains(&now_ms.saturating_sub(t)));
 
                 if fh_drop && !recent_fh {
                     notes.push(format!(
@@ -697,17 +704,22 @@ impl SwitcherApp {
                 }
             }
 
-            let recent_fh = fh_notice_at.is_some_and(|t| now_ms - t < 45 * 60 * 1000);
-            let recent_sd = sd_notice_at.is_some_and(|t| now_ms - t < 2 * 60 * 60 * 1000);
+            let recent_fh = fh_notice_at
+                .is_some_and(|t| (0..45 * 60 * 1000).contains(&now_ms.saturating_sub(t)));
+            let recent_sd = sd_notice_at
+                .is_some_and(|t| (0..2 * 60 * 60 * 1000).contains(&now_ms.saturating_sub(t)));
 
             if !fh_notified && q.fh_active {
                 if let Some(reset) = q.fh_reset_at {
                     if now >= reset && q.updated <= reset {
                         let key = reset.timestamp_millis();
-                        let same = fh_notice_for.is_some_and(|v| (v - key).abs() < 30 * 60 * 1000);
-                        let fresh = now_ms - key < 6 * 60 * 60 * 1000;
+                        let same = fh_notice_for.is_some_and(|v| v.abs_diff(key) < 30 * 60 * 1000);
+                        let fresh = (0..6 * 60 * 60 * 1000).contains(&now_ms.saturating_sub(key));
                         if !recent_fh && !same && fresh {
-                            notes.push(format!("{}：5 小时额度已重置（按上次记录推算）", account.name));
+                            notes.push(format!(
+                                "{}：5 小时额度已重置（按上次记录推算）",
+                                account.name
+                            ));
                             fh_notified = true;
                             fh_key = Some(key);
                         }
@@ -716,17 +728,19 @@ impl SwitcherApp {
             }
 
             if !sd_notified {
-                if let Some(anchor) = q.sd_anchor {
-                    let week = chrono::Duration::days(7);
-                    let mut last = anchor;
-                    while last + week <= now {
-                        last += week;
-                    }
+                if let Some((last, _)) = q
+                    .sd_anchor
+                    .and_then(|anchor| data::weekly_window(anchor, now))
+                {
                     if q.updated <= last && (now - last).num_hours() <= 24 {
                         let key = last.timestamp_millis();
-                        let same = sd_notice_for.is_some_and(|v| (v - key).abs() < 12 * 60 * 60 * 1000);
+                        let same =
+                            sd_notice_for.is_some_and(|v| v.abs_diff(key) < 12 * 60 * 60 * 1000);
                         if !recent_sd && !same {
-                            notes.push(format!("{}：本周额度已重置（按上次记录推算）", account.name));
+                            notes.push(format!(
+                                "{}：本周额度已重置（按上次记录推算）",
+                                account.name
+                            ));
                             sd_notified = true;
                             sd_key = Some(key);
                         }
@@ -761,7 +775,7 @@ impl SwitcherApp {
 
         if changed {
             self.settings.set_quota_watch(watch);
-            self.settings.save();
+            self.save_settings();
         }
         notes
     }
@@ -820,10 +834,10 @@ impl SwitcherApp {
     // --------------------------------------------------------------- actions ----
 
     pub fn launch(&mut self, id: &str, ctx: &egui::Context) {
+        self.ensure_install(ctx);
         let Some(account) = self.account(id).cloned() else {
             return;
         };
-        self.ensure_install(ctx);
         self.select(account.id.clone(), ctx);
 
         if let Some(pid) = account.running_pid {
@@ -857,7 +871,7 @@ impl SwitcherApp {
         if fresh.available() {
             self.install = fresh;
             self.settings.set_install_cache(&self.install);
-            self.settings.save();
+            self.save_settings();
             self.reload_accounts(ctx);
         }
     }
@@ -867,7 +881,10 @@ impl SwitcherApp {
         if !self.install.available() && self.install.aumid.is_none() {
             self.show_message(
                 "找不到 Claude 桌面版",
-                format!("请先安装 Claude，或确认它仍然存在：\n{}", self.install.exe.display()),
+                format!(
+                    "请先安装 Claude，或确认它仍然存在：\n{}",
+                    self.install.exe.display()
+                ),
                 Tone::Error,
             );
             return;
@@ -878,12 +895,17 @@ impl SwitcherApp {
 
     pub fn add_account(&mut self, ctx: &egui::Context, name: &str) {
         self.ensure_install(ctx);
-        let path = paths().local.join(format!("{}{}", data::PROFILE_PREFIX, name));
+        if let Err(error) = data::validate_label(name, &self.accounts, None) {
+            self.show_message("添加账号失败", error, Tone::Error);
+            return;
+        }
+        let path = paths()
+            .local
+            .join(format!("{}{}", data::PROFILE_PREFIX, name));
         match win::launch_profile(&self.install, &path) {
             Ok(()) => {
                 self.reload_accounts(ctx);
-                self.selected_id = name.to_owned();
-                self.refresh_usage(false);
+                self.select(name.to_owned(), ctx);
                 self.toast(format!("已创建 '{name}'，正在打开登录窗口…"), Tone::Success);
                 self.pending_query_at = Some(Instant::now() + Duration::from_millis(1300));
             }
@@ -891,11 +913,18 @@ impl SwitcherApp {
         }
     }
 
-    pub fn rename_account(&mut self, id: &str, name: &str, ctx: &egui::Context) -> Result<(), String> {
+    pub fn rename_account(
+        &mut self,
+        id: &str,
+        name: &str,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
         data::validate_label(name, &self.accounts, Some(id))?;
         let name = name.trim().to_owned();
         self.settings.set_label(id, Some(&name));
-        self.settings.save();
+        self.settings
+            .save()
+            .map_err(|error| format!("无法保存名称：{error}"))?;
         self.reload_accounts(ctx);
         self.selected_id = id.to_owned();
         self.toast(format!("已重命名为 '{name}'。"), Tone::Success);
@@ -903,6 +932,21 @@ impl SwitcherApp {
     }
 
     pub fn delete_account(&mut self, id: &str, ctx: &egui::Context) {
+        // Confirmation may have been open across multiple polls or a new launch.
+        // Refresh now, and refuse deletion if process ownership cannot be checked.
+        let processes = win::query_claude_processes();
+        let unreadable = win::claude_pids()
+            .iter()
+            .any(|pid| !processes.iter().any(|process| process.pid == *pid));
+        self.apply_processes(processes);
+        if unreadable {
+            self.show_message(
+                "无法确认账号状态",
+                "无法读取部分 Claude 进程的状态。请关闭 Claude 后重试删除。",
+                Tone::Warning,
+            );
+            return;
+        }
         let Some(account) = self.account(id).cloned() else {
             return;
         };
@@ -921,7 +965,7 @@ impl SwitcherApp {
             Ok(()) => {
                 self.settings.set_label(&account.id, None);
                 self.settings.forget_color(&account.id);
-                self.settings.save();
+                self.save_settings();
                 self.reload_accounts(ctx);
                 self.toast(format!("已删除 '{}'。", account.name), Tone::Success);
             }
@@ -961,13 +1005,13 @@ impl SwitcherApp {
             );
             return;
         }
-        let targets: Vec<&Account> = self
-            .accounts
-            .iter()
-            .filter(|a| a.id != source.id)
-            .collect();
+        let targets: Vec<&Account> = self.accounts.iter().filter(|a| a.id != source.id).collect();
         if targets.is_empty() {
-            self.show_message("没有其他账号", "请先添加第二个账号，再向其转移对话。", Tone::Info);
+            self.show_message(
+                "没有其他账号",
+                "请先添加第二个账号，再向其转移对话。",
+                Tone::Info,
+            );
             return;
         }
         let checked = vec![false; sessions.len()];
@@ -1014,7 +1058,11 @@ impl SwitcherApp {
         if !failures.is_empty() {
             self.show_message(
                 "转移失败",
-                format!("已复制 {copied} 个，失败 {} 个。\n\n{}", failures.len(), failures.join("\n")),
+                format!(
+                    "已复制 {copied} 个，失败 {} 个。\n\n{}",
+                    failures.len(),
+                    failures.join("\n")
+                ),
                 Tone::Error,
             );
             return;
@@ -1031,7 +1079,7 @@ impl SwitcherApp {
             primary: if running {
                 "完成".into()
             } else {
-                format!("打开 '{}'", target.name)
+                "打开账号".into()
             },
             secondary: if running { None } else { Some("稍后".into()) },
             action: if running {
@@ -1101,7 +1149,7 @@ impl SwitcherApp {
             theme::Mode::Light => "light",
             theme::Mode::Dark => "dark",
         });
-        self.settings.save();
+        self.save_settings();
         win::apply_window_style(self.pal.is_dark());
         ctx.request_repaint();
     }
@@ -1112,10 +1160,7 @@ impl SwitcherApp {
         crate::win::reveal_main_window();
         if self.tray_hint_pending {
             self.tray_hint_pending = false;
-            self.toast(
-                "切换器仍在后台运行；点击通知区图标可重新打开。",
-                Tone::Info,
-            );
+            self.toast("切换器仍在后台运行；点击通知区图标可重新打开。", Tone::Info);
         }
     }
 
@@ -1139,7 +1184,7 @@ impl SwitcherApp {
             crate::win::close_to_tray();
             if !self.settings.tray_hint_shown() {
                 self.settings.set_tray_hint_shown();
-                self.settings.save();
+                self.save_settings();
                 self.tray_hint_pending = true;
             }
         } else {
@@ -1152,21 +1197,14 @@ impl SwitcherApp {
         if !matches!(self.dialog, Dialog::None) {
             return;
         }
-        let (
-            up,
-            down,
-            enter,
-            rename,
-            delete,
-            new,
-        ) = ctx.input(|i| {
+        let new = take_add_account_shortcut(ctx);
+        let (up, down, enter, rename, delete) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::ArrowUp),
                 i.key_pressed(egui::Key::ArrowDown),
                 i.key_pressed(egui::Key::Enter),
                 i.key_pressed(egui::Key::F2),
                 i.key_pressed(egui::Key::Delete),
-                i.modifiers.ctrl && i.key_pressed(egui::Key::N),
             )
         });
         if up || down {
@@ -1323,8 +1361,17 @@ impl eframe::App for SwitcherApp {
                 };
             self.refresh_meta();
         }
+        if now >= self.next_identity {
+            self.next_identity = now + Duration::from_secs(30);
+            self.identity.clear();
+            self.load_identities_in(Some(ctx));
+        }
         self.maybe_quota_watch();
         self.expire_toast();
+
+        if let Some(error) = self.settings_error.take() {
+            self.toast(format!("设置未保存：{error}"), Tone::Error);
+        }
 
         self.bar_fh.update(dt);
         self.bar_sd.update(dt);
@@ -1359,7 +1406,8 @@ impl eframe::App for SwitcherApp {
     }
 }
 
-pub fn tone_color(tone: Tone, pal: &theme::Palette) -> egui::Color32 {    match tone {
+pub fn tone_color(tone: Tone, pal: &theme::Palette) -> egui::Color32 {
+    match tone {
         Tone::Info => pal.weekly,
         Tone::Success => pal.running,
         Tone::Warning => {
@@ -1379,8 +1427,7 @@ fn load_avatar_texture(
     path: &std::path::Path,
     name: String,
 ) -> Option<egui::TextureHandle> {
-    let bytes = std::fs::read(path).ok()?;
-    let image = image::load_from_memory(&bytes).ok()?;
+    let image = read_avatar_image(path).ok()?;
     let image = image.resize_to_fill(256, 256, image::imageops::FilterType::Lanczos3);
     let rgba = image.to_rgba8();
     let color = egui::ColorImage::from_rgba_unmultiplied(
@@ -1388,4 +1435,62 @@ fn load_avatar_texture(
         rgba.as_raw(),
     );
     Some(ctx.load_texture(name, color, egui::TextureOptions::LINEAR))
+}
+
+fn read_avatar_image(path: &std::path::Path) -> image::ImageResult<image::DynamicImage> {
+    let mut reader = image::ImageReader::open(path)?.with_guessed_format()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    reader.limits(limits);
+    reader.decode()
+}
+
+fn take_add_account_shortcut(ctx: &egui::Context) -> bool {
+    // Read the key event's modifiers. The frame's final modifier state can already
+    // be cleared when a quick Ctrl+N press and release arrive in the same frame.
+    ctx.input_mut(|input| {
+        input.consume_shortcut(&egui::KeyboardShortcut::new(
+            egui::Modifiers::CTRL,
+            egui::Key::N,
+        ))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::TestDir;
+
+    #[test]
+    fn new_account_shortcut_survives_modifier_release_in_same_frame() {
+        let ctx = egui::Context::default();
+        let events = [true, false].map(|pressed| egui::Event::Key {
+            key: egui::Key::N,
+            physical_key: Some(egui::Key::N),
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        });
+        let input = egui::RawInput {
+            modifiers: egui::Modifiers::NONE,
+            events: events.into(),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            assert!(take_add_account_shortcut(ctx));
+            assert!(!take_add_account_shortcut(ctx));
+        });
+    }
+
+    #[test]
+    fn avatar_decoder_accepts_normal_png_and_rejects_oversized_dimensions() {
+        let dir = TestDir::new();
+        let path = dir.path().join("avatar.png");
+        image::RgbaImage::new(32, 32).save(&path).unwrap();
+        assert!(read_avatar_image(&path).is_ok());
+        image::RgbaImage::new(16_385, 1).save(&path).unwrap();
+        assert!(read_avatar_image(&path).is_err());
+    }
 }

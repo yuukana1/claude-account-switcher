@@ -46,10 +46,7 @@ impl SwitcherApp {
                     Pos2::new(rect.left(), TITLE_H),
                     Pos2::new(rect.left() + SIDEBAR_W, rect.bottom()),
                 );
-                let detail = Rect::from_min_max(
-                    Pos2::new(sidebar.right(), TITLE_H),
-                    rect.max,
-                );
+                let detail = Rect::from_min_max(Pos2::new(sidebar.right(), TITLE_H), rect.max);
                 self.draw_sidebar(ui, sidebar);
                 self.draw_detail(ui, detail);
 
@@ -76,7 +73,10 @@ impl SwitcherApp {
         theme::logo_image(
             &painter,
             &self.logo_small,
-            Rect::from_center_size(Pos2::new(bar.left() + 22.0, bar.center().y), Vec2::splat(15.0)),
+            Rect::from_center_size(
+                Pos2::new(bar.left() + 22.0, bar.center().y),
+                Vec2::splat(15.0),
+            ),
         );
 
         let drag = ui.interact(bar, Id::new("titlebar_drag"), Sense::click_and_drag());
@@ -243,10 +243,7 @@ impl SwitcherApp {
         );
         let more = make_footer_button(ui, footer, "更多", theme::icon_dots, &pal);
         if more.clicked() {
-            let open = self
-                .menu
-                .as_ref()
-                .is_some_and(|m| m.kind == MenuKind::More);
+            let open = self.menu.as_ref().is_some_and(|m| m.kind == MenuKind::More);
             if open {
                 self.menu = None;
             } else {
@@ -299,10 +296,7 @@ impl SwitcherApp {
             // selection: a barely-there wash, while the selected account is a raised
             // card with a hairline border and a clay edge marker.
             let raised = context_surface(pal);
-            let wash = theme::with_alpha(
-                pal.ink,
-                if pal.is_dark() { 0.05 } else { 0.024 } * hover,
-            );
+            let wash = theme::with_alpha(pal.ink, if pal.is_dark() { 0.05 } else { 0.024 } * hover);
             let base = theme::mix(wash, raised, select);
             if select > 0.01 {
                 theme::soft_shadow(
@@ -314,7 +308,11 @@ impl SwitcherApp {
                     if pal.is_dark() { 70 } else { 16 },
                 );
             }
-            painter.rect_filled(rect.shrink2(Vec2::new(2.0, 1.0)), CornerRadius::same(8), base);
+            painter.rect_filled(
+                rect.shrink2(Vec2::new(2.0, 1.0)),
+                CornerRadius::same(8),
+                base,
+            );
             if select > 0.01 {
                 painter.rect_stroke(
                     rect.shrink2(Vec2::new(2.0, 1.0)),
@@ -360,7 +358,12 @@ impl SwitcherApp {
             .account_email(&account.id)
             .map(|e| e.to_owned())
             .unwrap_or_else(|| format!("{} 个 Code 对话", account.session_count));
-        let sub = theme::truncate(ui.ctx(), &sub, &ui_font(9.8), (right_x - text_x - 20.0).max(50.0));
+        let sub = theme::truncate(
+            ui.ctx(),
+            &sub,
+            &ui_font(9.8),
+            (right_x - text_x - 20.0).max(50.0),
+        );
         painter.text(
             Pos2::new(text_x, rect.center().y + 9.0),
             Align2::LEFT_CENTER,
@@ -460,7 +463,13 @@ impl SwitcherApp {
         );
 
         let Some(account) = self.selected().cloned() else {
-            painter.text(rect.center(), Align2::CENTER_CENTER, "还没有账号", ui_font(13.0), pal.muted);
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                "还没有账号",
+                ui_font(13.0),
+                pal.muted,
+            );
             return;
         };
 
@@ -470,10 +479,8 @@ impl SwitcherApp {
         );
 
         // ---- identity block ----
-        let avatar = Rect::from_min_size(
-            Pos2::new(content.left(), content.top()),
-            Vec2::splat(56.0),
-        );
+        let avatar =
+            Rect::from_min_size(Pos2::new(content.left(), content.top()), Vec2::splat(56.0));
         self.draw_avatar(ui, avatar, &account, 20.0);
 
         let name = self.row_heading(&account);
@@ -602,7 +609,13 @@ impl SwitcherApp {
         theme::card(&painter, usage_rect, 12, &pal);
         let inner = usage_rect.shrink2(Vec2::new(18.0, 16.0));
 
-        painter.text(inner.left_top(), Align2::LEFT_TOP, "额度", semi_font(11.6), pal.ink);
+        painter.text(
+            inner.left_top(),
+            Align2::LEFT_TOP,
+            "额度",
+            semi_font(11.6),
+            pal.ink,
+        );
 
         let usage_snapshot = self.usage.clone();
         if let Some(usage_data) = &usage_snapshot {
@@ -629,7 +642,11 @@ impl SwitcherApp {
                     theme::with_alpha(pal.ink, 0.05 * rh),
                 );
             }
-            theme::icon_refresh(&painter, refresh.shrink(6.0), theme::mix(pal.faint, pal.ink, rh));
+            theme::icon_refresh(
+                &painter,
+                refresh.shrink(6.0),
+                theme::mix(pal.faint, pal.ink, rh),
+            );
             if refresh_resp.clicked() {
                 self.refresh_usage(true);
                 self.toast("已重新读取额度。", Tone::Info);
@@ -652,35 +669,35 @@ impl SwitcherApp {
                 if label.is_empty() {
                     // The banner above carries the message.
                 } else {
-                let font = ui_font(10.0);
-                let width = measure(ui.ctx(), &label, &font);
-                let pill = Rect::from_min_size(
-                    Pos2::new(inner.right() - 34.0 - width - 20.0, inner.top() - 2.0),
-                    Vec2::new(width + 20.0, 20.0),
-                );
-                let (bg, fg) = if imminent {
-                    (theme::with_alpha(pal.accent, 0.15), pal.accent_dark)
-                } else {
-                    (theme::with_alpha(pal.ink, 0.045), pal.muted)
-                };
-                painter.rect_filled(pill, CornerRadius::same(10), bg);
-                let pulse = if imminent {
-                    0.55 + 0.45 * breathe(self.time, 1.6)
-                } else {
-                    1.0
-                };
-                painter.circle_filled(
-                    Pos2::new(pill.left() + 9.0, pill.center().y),
-                    2.6,
-                    theme::with_alpha(if imminent { pal.accent } else { pal.faint }, pulse),
-                );
-                painter.text(
-                    Pos2::new(pill.left() + 16.0, pill.center().y),
-                    Align2::LEFT_CENTER,
-                    label,
-                    font,
-                    fg,
-                );
+                    let font = ui_font(10.0);
+                    let width = measure(ui.ctx(), &label, &font);
+                    let pill = Rect::from_min_size(
+                        Pos2::new(inner.right() - 34.0 - width - 20.0, inner.top() - 2.0),
+                        Vec2::new(width + 20.0, 20.0),
+                    );
+                    let (bg, fg) = if imminent {
+                        (theme::with_alpha(pal.accent, 0.15), pal.accent_dark)
+                    } else {
+                        (theme::with_alpha(pal.ink, 0.045), pal.muted)
+                    };
+                    painter.rect_filled(pill, CornerRadius::same(10), bg);
+                    let pulse = if imminent {
+                        0.55 + 0.45 * breathe(self.time, 1.6)
+                    } else {
+                        1.0
+                    };
+                    painter.circle_filled(
+                        Pos2::new(pill.left() + 9.0, pill.center().y),
+                        2.6,
+                        theme::with_alpha(if imminent { pal.accent } else { pal.faint }, pulse),
+                    );
+                    painter.text(
+                        Pos2::new(pill.left() + 16.0, pill.center().y),
+                        Align2::LEFT_CENTER,
+                        label,
+                        font,
+                        fg,
+                    );
                 }
             }
 
@@ -688,9 +705,26 @@ impl SwitcherApp {
             let (fh_value, fh_hint) = usage_data.fh_row(now);
             let (sd_value, sd_hint) = usage_data.sd_row(now);
             let row_y = 34.0;
-            self.draw_meter(ui, inner, row_y, "5 小时", fh_value, self.bar_fh.value, &fh_hint, pal.accent);
-            self.draw_meter(ui, inner, row_y + 54.0, "本周", sd_value, self.bar_sd.value, &sd_hint, pal.weekly);
-
+            self.draw_meter(
+                ui,
+                inner,
+                row_y,
+                "5 小时",
+                fh_value,
+                self.bar_fh.value,
+                &fh_hint,
+                pal.accent,
+            );
+            self.draw_meter(
+                ui,
+                inner,
+                row_y + 54.0,
+                "本周",
+                sd_value,
+                self.bar_sd.value,
+                &sd_hint,
+                pal.weekly,
+            );
         } else {
             painter.text(
                 Pos2::new(inner.left(), inner.top() + 42.0),
@@ -744,9 +778,7 @@ impl SwitcherApp {
                     pal.faint,
                 );
             } else {
-                for (index, session) in
-                    self.recent_sessions.iter().take(max_rows).enumerate()
-                {
+                for (index, session) in self.recent_sessions.iter().take(max_rows).enumerate() {
                     let y = rows_top + index as f32 * row_h;
                     theme::icon_chat(
                         &painter,
@@ -769,12 +801,7 @@ impl SwitcherApp {
                         ui_font(10.8),
                         pal.ink,
                     );
-                    let folder = theme::truncate(
-                        ui.ctx(),
-                        &session.folder,
-                        &ui_font(9.4),
-                        92.0,
-                    );
+                    let folder = theme::truncate(ui.ctx(), &session.folder, &ui_font(9.4), 92.0);
                     painter.text(
                         Pos2::new(rinner.right() - 96.0, y + 8.0),
                         Align2::RIGHT_CENTER,
@@ -804,11 +831,13 @@ impl SwitcherApp {
 
         // ---- actions ----
         let button_y = actions_top;
-        let primary = Rect::from_min_size(
-            Pos2::new(content.left(), button_y),
-            Vec2::new(156.0, 40.0),
-        );
-        let label = if running { "聚焦 Claude" } else { "打开 Claude" };
+        let primary =
+            Rect::from_min_size(Pos2::new(content.left(), button_y), Vec2::new(156.0, 40.0));
+        let label = if running {
+            "聚焦 Claude"
+        } else {
+            "打开 Claude"
+        };
         let open = button_at(
             ui,
             primary,
@@ -967,7 +996,11 @@ impl SwitcherApp {
             Align2::RIGHT_CENTER,
             hint,
             ui_font(9.8),
-            if hint.starts_with("已重置") { pal.faint } else { pal.muted },
+            if hint.starts_with("已重置") {
+                pal.faint
+            } else {
+                pal.muted
+            },
         );
     }
 
@@ -1206,10 +1239,15 @@ impl SwitcherApp {
                             }
                             let (rect, resp) = ui.allocate_exact_size(
                                 Vec2::new(width - 10.0, 28.0),
-                                if item.enabled { Sense::click() } else { Sense::hover() },
+                                if item.enabled {
+                                    Sense::click()
+                                } else {
+                                    Sense::hover()
+                                },
                             );
                             let hover = if item.enabled {
-                                ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12)
+                                ui.ctx()
+                                    .animate_bool_with_time(resp.id, resp.hovered(), 0.12)
                             } else {
                                 0.0
                             };
@@ -1231,7 +1269,11 @@ impl SwitcherApp {
                                 Pos2::new(rect.left() + 8.0, rect.center().y),
                                 Align2::LEFT_CENTER,
                                 &item.label,
-                                if item.bold { semi_font(11.4) } else { ui_font(11.4) },
+                                if item.bold {
+                                    semi_font(11.4)
+                                } else {
+                                    ui_font(11.4)
+                                },
                                 color,
                             );
                             let mut reserved = 0.0;
@@ -1266,9 +1308,8 @@ impl SwitcherApp {
                     });
             });
 
-        if action.is_some() {
-            self.menu = None;
-        } else if close
+        if action.is_some()
+            || close
             || ctx.input(|i| i.key_pressed(egui::Key::Escape))
             || (opened
                 && ctx.input(|i| i.pointer.any_click())
@@ -1352,7 +1393,11 @@ fn title_button(ui: &mut Ui, rect: Rect, icon: IconFn, pal: &Palette) -> bool {
             theme::with_alpha(pal.ink, 0.07 * hover),
         );
     }
-    icon(ui.painter(), rect.shrink(8.0), theme::mix(pal.faint, pal.ink, hover));
+    icon(
+        ui.painter(),
+        rect.shrink(8.0),
+        theme::mix(pal.faint, pal.ink, hover),
+    );
     if response.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     }
@@ -1375,11 +1420,21 @@ fn icon_button(ui: &mut Ui, rect: Rect, icon: IconFn, pal: &Palette) -> Response
             theme::with_alpha(pal.ink, 0.06 * hover),
         );
     }
-    icon(ui.painter(), rect.shrink(7.0), theme::mix(pal.muted, pal.ink, hover));
+    icon(
+        ui.painter(),
+        rect.shrink(7.0),
+        theme::mix(pal.muted, pal.ink, hover),
+    );
     response
 }
 
-fn make_footer_button(ui: &mut Ui, footer: Rect, label: &str, icon: IconFn, pal: &Palette) -> Response {
+fn make_footer_button(
+    ui: &mut Ui,
+    footer: Rect,
+    label: &str,
+    icon: IconFn,
+    pal: &Palette,
+) -> Response {
     let rect = Rect::from_min_size(
         Pos2::new(footer.right() - 76.0, footer.top() + 10.0),
         Vec2::new(76.0, 32.0),
@@ -1398,7 +1453,10 @@ fn make_footer_button(ui: &mut Ui, footer: Rect, label: &str, icon: IconFn, pal:
     let color = theme::mix(pal.muted, pal.ink, hover);
     icon(
         ui.painter(),
-        Rect::from_center_size(Pos2::new(rect.left() + 14.0, rect.center().y), Vec2::splat(13.0)),
+        Rect::from_center_size(
+            Pos2::new(rect.left() + 14.0, rect.center().y),
+            Vec2::splat(13.0),
+        ),
         color,
     );
     ui.painter().text(
@@ -1444,7 +1502,11 @@ pub(super) fn button_at(
     let response = ui.interact(
         rect,
         id,
-        if enabled { Sense::click() } else { Sense::hover() },
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
     );
     let hover = if enabled {
         ui.ctx()
@@ -1508,7 +1570,11 @@ pub(super) fn button_at(
         measure(ui.ctx(), label, &label_font)
     };
     let icon_w = if icon.is_some() { 15.0 } else { 0.0 };
-    let gap = if icon.is_some() && !label.is_empty() { 7.0 } else { 0.0 };
+    let gap = if icon.is_some() && !label.is_empty() {
+        7.0
+    } else {
+        0.0
+    };
     let total = icon_w + gap + label_width;
     let start = draw_rect.center().x - total * 0.5;
     if let Some(icon) = icon {

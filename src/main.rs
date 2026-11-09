@@ -7,12 +7,16 @@ mod app;
 mod data;
 mod identity;
 mod settings;
+mod storage;
 mod theme;
 mod win;
 
+#[cfg(test)]
+mod test_support;
+
 use std::time::Instant;
 
-use data::{discover_accounts, discover_install, paths, refresh_metadata, read_usage};
+use data::{discover_accounts, discover_install, paths, read_usage, refresh_metadata};
 use settings::Settings;
 
 fn main() -> eframe::Result<()> {
@@ -50,6 +54,7 @@ fn main() -> eframe::Result<()> {
 
 fn dump() {
     let started = Instant::now();
+    println!("switcher   : {}", env!("CARGO_PKG_VERSION"));
     let paths = paths();
     let mut settings = Settings::load(paths.settings.clone());
     let install = discover_install(settings.install_cache());
@@ -63,7 +68,10 @@ fn dump() {
     println!("aumid      : {:?}", install.aumid);
     println!("pfn        : {:?}", install.pfn);
     println!("default    : {}", install.default_profile.display());
-    println!("data dirs  : {:?}", data::claude_data_dirs(install.pfn.as_deref()));
+    println!(
+        "data dirs  : {:?}",
+        data::claude_data_dirs(install.pfn.as_deref())
+    );
 
     let mut accounts = discover_accounts(&install, &mut settings);
     for account in &mut accounts {
@@ -91,7 +99,11 @@ fn dump() {
                 usage.fh_reset_at.map(|t| t.to_string()),
                 usage.sd_anchor.map(|t| t.to_string())
             );
-            println!("   rows : fh={:?} sd={:?}", usage.fh_row(now), usage.sd_row(now));
+            println!(
+                "   rows : fh={:?} sd={:?}",
+                usage.fh_row(now),
+                usage.sd_row(now)
+            );
         }
         let sessions = data::list_sessions(&install, account);
         println!(
