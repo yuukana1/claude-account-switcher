@@ -5,8 +5,7 @@
 免安装的 Windows 托盘工具，让多个 Claude 桌面版账号同时运行。
 每个账号使用独立的配置目录，切换时不需要重新登录。
 
-面向 **Windows 官方 Claude 桌面版**（已在 4.23118.x 上验证），持续维护：
-官方更新导致切换器失效时会尽快修复。
+面向 **Windows 官方 Claude 桌面版**（已在 4.23118.x 上验证）。
 
 ![Claude Account Switcher](dist/preview-light.png)
 *截图中账号信息已打码。*

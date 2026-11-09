@@ -5,8 +5,7 @@ English | [简体中文](README.zh-CN.md)
 A portable Windows tray app for running several Claude desktop accounts side by side.
 Each account keeps its own profile directory, so switching never asks you to sign in again.
 
-It targets the **official Claude desktop app for Windows** (tested with 4.23118.x) and is
-actively maintained: if a Claude update breaks the switcher, a fix follows as soon as possible.
+It targets the **official Claude desktop app for Windows** (tested with 4.23118.x).
 
 ![Claude Account Switcher](dist/preview-light.png)
 *Screenshots use redacted account details.*
