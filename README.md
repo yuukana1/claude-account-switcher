@@ -19,6 +19,7 @@ Two accounts running side by side:
 - **Accounts** — lists the profiles already on this PC with e-mail, running state and Claude Code conversation count.
 - **Usage** — live 5-hour / weekly usage, reset countdown, and a warning shortly before a reset.
 - **Switching** — opens or focuses an account in its own window, and copies Claude Code conversations between accounts.
+- **Taskbar** — each secondary account has its own taskbar group, with its avatar in a corner of the Claude icon (or its initial/color if no avatar is set). Already-running windows are updated without restarting Claude. Keep the switcher running in the tray so it can also tag new windows.
 - **Personal** — avatar and nickname per account; light and dark themes.
 - **Removal** — permanently removes a selected non-default profile after confirmation, including its local conversations. Back up anything you need first.
 - **Tray** — the titlebar × only closes the window; the app stays in the notification area. Quit lives in the tray menu.
@@ -54,6 +55,8 @@ Tests use temporary directories and synthetic profile data. They do not change y
 The app reads Claude's profiles and settings and makes no network requests. Adding an account creates a separate profile directory and launches Claude. Explicit conversation copies write new index files without overwriting existing copies; the source stays unchanged. Confirming removal permanently deletes the selected non-default profile directory and its local conversations. The default account cannot be removed.
 
 The switcher's settings and avatars are saved by replacing a complete temporary file. Failed saves are reported and leave the previous file intact. If an existing settings file cannot be read or parsed, it is preserved; repair it and restart the switcher before saving changes.
+
+On startup, the switcher also checks for the old `Claude Profile Switcher.lnk.disabled` shortcut in the current user's Windows Startup folder. If it is a regular Shell Link file, it is moved to `%LOCALAPPDATA%\ClaudeProfiles\.switcher\startup-backups`, preserving its contents and any earlier backups. A disabled shortcut should be kept outside Startup to avoid Windows' file-association prompt. Active startup shortcuts and other applications' entries are not migrated.
 
 Anthropic Sans/Serif are extracted locally from the installed Claude app and are not bundled.
 

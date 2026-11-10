@@ -230,6 +230,16 @@ pub fn custom_avatar_path(account_id: &str, allow_legacy: bool) -> Option<PathBu
         .find(|path| path.is_file())
 }
 
+pub fn read_avatar_image(path: &Path) -> image::ImageResult<image::DynamicImage> {
+    let mut reader = image::ImageReader::open(path)?.with_guessed_format()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    reader.limits(limits);
+    reader.decode()
+}
+
 pub fn avatar_paths(account_id: &str, allow_legacy: bool) -> Vec<PathBuf> {
     let Some(base) = avatar_dir() else {
         return Vec::new();

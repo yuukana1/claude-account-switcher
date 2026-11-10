@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.0.2 — 2026-11-09
+
+- Restore a separate taskbar group for each secondary account. The switcher applies a stable per-profile AppUserModelID to existing and newly created Claude windows, including while it is in the tray. The default account keeps Claude's original identity.
+- Add the account's avatar as a large circular corner badge on Claude's taskbar icon. The main mark sits at the upper left so its center remains visible; the avatar fills 62.5% of the full icon width at the lower right. Accounts without an avatar use their initial and stored color. Avatar changes use a new artwork revision so Explorer refreshes cached icons; PNG-compressed ICO frames cover 16–256 pixels.
+- Keep secondary-account taskbar relaunch commands tied to the correct profile, including Unicode names and paths with spaces. Renaming updates the taskbar display name; the group identity stays stable while its artwork is unchanged.
+- Move the known legacy `Claude Profile Switcher.lnk.disabled` shortcut out of the Windows Startup folder into `ClaudeProfiles/.switcher/startup-backups`. Changing a startup file's extension can cause an Open With prompt. The shortcut is preserved, existing backups are never overwritten, and unrelated or enabled startup items are left alone.
+- Include read-only per-window taskbar identities and icon metadata in `--dump` and add eight regression tests, including actual hidden Win32 window properties, avatar changes, ICO frames, and backup collision/failure cases.
+
 ## 3.0.1 — 2026-11-09
 
 - Preserve settings and avatars when a save fails. Settings errors are reported, pending changes remain available for retry, and unreadable settings are not replaced with defaults.

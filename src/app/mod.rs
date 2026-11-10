@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 
 use crate::anim::Blend;
 use crate::data::{self, paths, Account, Install, Session, Usage, DEFAULT_ID};
-use crate::identity::{self, Identity};
+use crate::identity::{self, read_avatar_image, Identity};
 use crate::settings::Settings;
 use crate::theme;
 use crate::win::{self, ProcessInfo};
@@ -157,6 +157,8 @@ pub struct SwitcherApp {
     querying: bool,
     pending_query_at: Option<Instant>,
     next_poll: Instant,
+    next_taskbar: Instant,
+    taskbar_icons: crate::taskbar_icon::IconCache,
     next_full_query: Instant,
 
     next_meta: Instant,
@@ -265,6 +267,10 @@ impl SwitcherApp {
             querying: false,
             pending_query_at: None,
             next_poll: now,
+            next_taskbar: now,
+            taskbar_icons: crate::taskbar_icon::IconCache::new(
+                paths.switcher.join("taskbar-icons"),
+            ),
             next_full_query: now,
             next_meta: now,
             next_identity: now + Duration::from_secs(30),
@@ -296,6 +302,20 @@ impl SwitcherApp {
         tray::install_tray_handlers(&cc.egui_ctx);
 
         app.rebuild_tray();
+        let startup_dir = paths
+            .roaming
+            .join("Microsoft/Windows/Start Menu/Programs/Startup");
+        match crate::legacy::migrate_disabled_startup(
+            &startup_dir,
+            &paths.switcher.join("startup-backups"),
+        ) {
+            Ok(Some(_)) => app.toast(
+                "已将旧版禁用的启动快捷方式移至备份目录，避免 Windows 弹出文件打开方式。",
+                Tone::Info,
+            ),
+            Ok(None) => {}
+            Err(error) => app.toast(format!("无法备份旧启动项：{error}"), Tone::Warning),
+        }
         app
     }
 
@@ -594,6 +614,18 @@ impl SwitcherApp {
             self.apply_processes(list);
         }
         let now = Instant::now();
+        if now >= self.next_taskbar {
+            self.next_taskbar = now + Duration::from_secs(2);
+            if let Err(error) = crate::taskbar::sync_profiles(
+                &self.install,
+                &self.accounts,
+                &mut self.taskbar_icons,
+            ) {
+                // Keep account operations usable if a window exits during enumeration.
+                // Retry on the next poll; this does not affect Claude profile data.
+                eprintln!("Taskbar identity update: {error}");
+            }
+        }
         if now >= self.next_poll {
             self.next_poll = now + Duration::from_millis(2000);
             let pids = win::claude_pids();
@@ -1435,16 +1467,6 @@ fn load_avatar_texture(
         rgba.as_raw(),
     );
     Some(ctx.load_texture(name, color, egui::TextureOptions::LINEAR))
-}
-
-fn read_avatar_image(path: &std::path::Path) -> image::ImageResult<image::DynamicImage> {
-    let mut reader = image::ImageReader::open(path)?.with_guessed_format()?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(16_384);
-    limits.max_image_height = Some(16_384);
-    limits.max_alloc = Some(256 * 1024 * 1024);
-    reader.limits(limits);
-    reader.decode()
 }
 
 fn take_add_account_shortcut(ctx: &egui::Context) -> bool {

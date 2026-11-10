@@ -6,8 +6,11 @@ mod anim;
 mod app;
 mod data;
 mod identity;
+mod legacy;
 mod settings;
 mod storage;
+mod taskbar;
+mod taskbar_icon;
 mod theme;
 mod win;
 
@@ -122,6 +125,16 @@ fn dump() {
             );
         }
         println!("   store={:?}", data::session_store(&install, account));
+    }
+    for process in win::query_claude_processes() {
+        if let Some(profile) = win::process_profile_key(&process.cmdline, &install) {
+            println!(
+                "taskbar    : pid={} profile={} windows={:?}",
+                process.pid,
+                profile,
+                taskbar::window_identities(process.pid)
+            );
+        }
     }
     println!("\ndone in {:?}", started.elapsed());
 }
