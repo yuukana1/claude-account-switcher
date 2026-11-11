@@ -265,6 +265,45 @@ impl Settings {
 
     // ---- window / behaviour ----
 
+    pub fn daily_updates(&self) -> bool {
+        self.value
+            .get("DailyUpdateChecks")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+    }
+
+    pub fn daily_update_due(&self, today: &str) -> bool {
+        self.daily_updates() && self.update_check_date() != Some(today)
+    }
+
+    pub fn set_daily_updates(&mut self, enabled: bool) {
+        self.value["DailyUpdateChecks"] = Value::Bool(enabled);
+        self.dirty = true;
+    }
+
+    pub fn update_check_date(&self) -> Option<&str> {
+        self.value.get("UpdateCheckDate").and_then(Value::as_str)
+    }
+
+    pub fn record_update_attempt(&mut self, day: &str) {
+        if self.update_check_date() != Some(day) {
+            self.value["UpdateCheckDate"] = Value::String(day.into());
+            self.dirty = true;
+        }
+    }
+
+    pub fn available_version(&self) -> Option<&str> {
+        self.value.get("AvailableUpdate").and_then(Value::as_str)
+    }
+
+    pub fn set_available_version(&mut self, version: Option<&str>) {
+        if self.available_version() != version {
+            self.value["AvailableUpdate"] =
+                version.map_or(Value::Null, |v| Value::String(v.into()));
+            self.dirty = true;
+        }
+    }
+
     pub fn tray_on_close(&self) -> bool {
         self.value
             .get("TrayOnClose")
@@ -418,5 +457,21 @@ mod tests {
             Settings::load(path).last_account().as_deref(),
             Some("Secondary")
         );
+    }
+
+    #[test]
+    fn daily_update_attempt_survives_restart_and_respects_opt_out() {
+        let dir = TestDir::new();
+        let path = dir.path().join("settings.json");
+        let mut s = Settings::load(path.clone());
+        assert!(s.daily_update_due("2026-11-11"));
+        s.record_update_attempt("2026-11-11");
+        s.save().unwrap();
+        let mut s = Settings::load(path.clone());
+        assert!(!s.daily_update_due("2026-11-11"));
+        assert!(s.daily_update_due("2026-11-12"));
+        s.set_daily_updates(false);
+        s.save().unwrap();
+        assert!(!Settings::load(path).daily_update_due("2026-11-12"));
     }
 }

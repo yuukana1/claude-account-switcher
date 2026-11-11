@@ -54,7 +54,7 @@ pub(super) fn install_tray_handlers(ctx: &egui::Context) {
         if id == "quit" {
             std::process::exit(0);
         }
-        if id == "show" || id == "add" {
+        if id == "show" || id == "add" || id == "updates" {
             crate::win::reveal_main_window();
         }
         if let Ok(mut queue) = menu_queue().lock() {
@@ -90,6 +90,7 @@ impl SwitcherApp {
             signature.push(';');
         }
         signature.push_str(if self.startup { "boot1" } else { "boot0" });
+        signature.push_str(self.newer_version().unwrap_or(""));
         signature
     }
 
@@ -113,6 +114,11 @@ impl SwitcherApp {
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&MenuItem::with_id("add", "添加账号…", true, None));
         let _ = menu.append(&MenuItem::with_id("show", "打开切换器", true, None));
+        let updates = self
+            .newer_version()
+            .map(|v| format!("有新版本 v{v}…"))
+            .unwrap_or_else(|| "检查更新…".into());
+        let _ = menu.append(&MenuItem::with_id("updates", updates, true, None));
         let _ = menu.append(&CheckMenuItem::with_id(
             "startup",
             "开机自动启动",
@@ -201,6 +207,8 @@ impl SwitcherApp {
                 self.request_add_account();
             } else if id == "show" {
                 self.show_window(ctx);
+            } else if id == "updates" {
+                self.open_updates(ctx);
             } else if id == "startup" {
                 self.toggle_startup(ctx);
             } else if id == "quit" {

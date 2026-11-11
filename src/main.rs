@@ -12,6 +12,7 @@ mod storage;
 mod taskbar;
 mod taskbar_icon;
 mod theme;
+mod update;
 mod win;
 
 #[cfg(test)]
@@ -23,7 +24,30 @@ use data::{discover_accounts, discover_install, paths, read_usage, refresh_metad
 use settings::Settings;
 
 fn main() -> eframe::Result<()> {
-    if std::env::args().any(|arg| arg == "--dump") {
+    let mut args = std::env::args_os().skip(1);
+    let command = args.next();
+    if command.as_deref() == Some(std::ffi::OsStr::new("--version")) {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if command.as_deref() == Some(std::ffi::OsStr::new("--check-update")) {
+        match update::check() {
+            Ok(Some(release)) => println!("update available: {}", release.version),
+            Ok(None) => println!("up to date: {}", env!("CARGO_PKG_VERSION")),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+    if command.as_deref() == Some(std::ffi::OsStr::new("--await-update")) {
+        let pid = args.next().and_then(|p| p.to_str()?.parse().ok());
+        if !pid.is_some_and(|p| update::install::await_parent(p).is_ok()) {
+            std::process::exit(1);
+        }
+    }
+    if command.as_deref() == Some(std::ffi::OsStr::new("--dump")) {
         dump();
         return Ok(());
     }

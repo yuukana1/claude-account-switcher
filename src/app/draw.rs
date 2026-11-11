@@ -375,12 +375,32 @@ impl SwitcherApp {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
         }
 
+        let version_label = self
+            .newer_version()
+            .map(|v| format!("新版本 v{v}"))
+            .unwrap_or_else(|| format!("v{APP_VERSION}"));
+        let version_rect = Rect::from_min_size(
+            Pos2::new(footer.left(), footer.top() + 10.0),
+            Vec2::new(126.0, 32.0),
+        );
+        if ui
+            .interact(version_rect, Id::new("update_status"), Sense::click())
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("检查软件更新")
+            .clicked()
+        {
+            self.open_updates(ui.ctx());
+        }
         painter.text(
             Pos2::new(footer.left() + 12.0, footer.center().y),
             Align2::LEFT_CENTER,
-            format!("v{APP_VERSION}"),
+            version_label,
             ui_font(9.8),
-            pal.faint,
+            if self.newer_version().is_some() {
+                pal.accent_dark
+            } else {
+                pal.faint
+            },
         );
 
         for action in actions {
@@ -1374,6 +1394,16 @@ impl SwitcherApp {
                     bold: false,
                     sep_before: false,
                     action: UiAction::OpenFolder(self.selected_id.clone()),
+                },
+                MenuItem {
+                    label: "检查更新…".into(),
+                    shortcut: None,
+                    enabled: true,
+                    danger: false,
+                    checked: false,
+                    bold: false,
+                    sep_before: true,
+                    action: UiAction::Updates,
                 },
                 MenuItem {
                     label: "关于".into(),

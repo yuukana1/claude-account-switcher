@@ -59,6 +59,10 @@ impl SwitcherApp {
 
                 match dialog {
                     Dialog::None => {}
+                    Dialog::Updates => {
+                        dialog_heading(ui, "软件更新", &pal);
+                        if !self.update_panel(ui) { next = Dialog::Updates; }
+                    }
                     Dialog::Rename {
                         id,
                         mut buf,

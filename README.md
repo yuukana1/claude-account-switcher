@@ -31,6 +31,10 @@ Two accounts running side by side:
 
 ## Run
 
+**Updates:** Use More → Check for updates, the tray menu, or the version in the sidebar. While running, the switcher checks the project's latest stable GitHub release once per local calendar day, including in the tray. The attempt date survives restarts. Disable automatic checks in the update panel or check manually at any time. No scheduled task is installed.
+
+Choose Download, then Replace and restart after verification. The portable exe stays at its original path; only the switcher restarts. Its directory must be writable. The previous executable remains beside it in `.switcher-backup-*/previous.exe`. A failed launch/version handshake triggers a rollback attempt; for manual recovery, exit the switcher and copy the backup to the original path. Versions through 3.1.1 require one manual upgrade from [GitHub Releases](https://github.com/yuukana1/claude-account-switcher/releases/latest).
+
 `dist/Claude Account Switcher.exe` — one file, no installer, no .NET or PowerShell.
 
 ## Build
@@ -57,7 +61,7 @@ Tests use temporary directories and synthetic profile data. They do not change y
 
 ## Data & safety
 
-The app reads Claude's profiles and settings and makes no network requests. Adding an account creates a separate profile directory and launches Claude. Explicit conversation copies write new index files without overwriting existing copies; the source stays unchanged. Confirming removal permanently deletes the selected non-default profile directory and its local conversations. The default account cannot be removed.
+Account data is read locally. Update checks contact the project's GitHub Releases over HTTPS. Requested downloads are checked against GitHub's SHA-256 digest and size for the Windows x64 asset. No account, email, conversation or login credentials are sent. Adding an account creates a separate profile directory and launches Claude. Explicit conversation copies write new index files without overwriting existing copies; the source stays unchanged. Confirming removal permanently deletes the selected non-default profile directory and its local conversations. The default account cannot be removed.
 
 The switcher's settings and avatars are saved by replacing a complete temporary file. Failed saves are reported and leave the previous file intact. If an existing settings file cannot be read or parsed, it is preserved; repair it and restart the switcher before saving changes.
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.2.0 — 2026-11-11
+
+- Check for stable updates from the sidebar version, More menu or tray. Check once per local calendar day by default, persist the attempt across restarts, and allow manual checks or opting out. Background checks do not interrupt account work.
+- Download the official x64 executable inside the app with progress, size and SHA-256 verification. Restart on request, preserving the executable path and a rollback copy. The new process verifies its version before the old one exits; Claude windows are not closed.
+- Add a read-only `--check-update` diagnostic and a `--version` option.
+
 ## 3.1.1 — 2026-11-11
 
 - Browse account search results with the arrow keys. The highlighted result scrolls into view without switching accounts; Enter selects it. Pin and unpin directly on a sidebar row without changing the selection.

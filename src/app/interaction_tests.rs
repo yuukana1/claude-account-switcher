@@ -4,14 +4,14 @@ use super::*;
 use crate::test_support::TestDir;
 use egui::{Event, Key, Modifiers, Pos2};
 
-struct Fixture {
+pub(super) struct Fixture {
     dir: TestDir,
-    ctx: egui::Context,
-    app: SwitcherApp,
+    pub(super) ctx: egui::Context,
+    pub(super) app: SwitcherApp,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let dir = TestDir::new();
         let ctx = egui::Context::default();
         let mut fonts = egui::FontDefinitions::default();
@@ -122,7 +122,7 @@ impl Fixture {
         pos
     }
 
-    fn click_label(&mut self, label: &str) {
+    pub(super) fn click_label(&mut self, label: &str) {
         let pos = self.hover_label(label);
         for pressed in [true, false] {
             self.frame(vec![Event::PointerButton {

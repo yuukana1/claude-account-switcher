@@ -8,6 +8,7 @@ mod interaction_tests;
 mod search;
 mod transfer;
 mod tray;
+mod updates;
 
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -62,6 +63,7 @@ pub enum DialogAction {
 
 pub enum Dialog {
     None,
+    Updates,
     Rename {
         id: String,
         buf: String,
@@ -114,6 +116,7 @@ pub enum UiAction {
     ToggleStartup,
     ToggleTheme,
     OpenSettings,
+    Updates,
     About,
 }
 
@@ -178,6 +181,7 @@ pub struct SwitcherApp {
     styled: bool,
     pub tray_hint_pending: bool,
     settings_error: Option<String>,
+    updates: updates::Updates,
 }
 
 impl SwitcherApp {
@@ -338,6 +342,7 @@ impl SwitcherApp {
             styled: false,
             tray_hint_pending: false,
             settings_error: None,
+            updates: Default::default(),
         }
     }
 
@@ -1448,6 +1453,7 @@ impl SwitcherApp {
             UiAction::ToggleTheme => self.toggle_theme(ctx),
             UiAction::OpenSettings => self.open_settings_file(),
             UiAction::About => self.show_about(),
+            UiAction::Updates => self.open_updates(ctx),
         }
     }
 
@@ -1494,6 +1500,7 @@ impl eframe::App for SwitcherApp {
         self.handle_keyboard(ctx);
         self.poll_process(ctx);
         self.poll_tray(ctx);
+        self.poll_updates(ctx);
 
         let now = Instant::now();
         // Hidden or minimized, there is nothing to look at. Keep the cheap probes (tray,
