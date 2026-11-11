@@ -75,14 +75,29 @@ pub(crate) fn parse_release(bytes: &[u8], current: &Version) -> Result<Option<Up
     }))
 }
 
-pub fn check() -> Result<Option<Update>, String> {
-    let bytes = http::get(
-        "api.github.com",
-        &format!("/repos/{REPO}/releases/latest"),
-        1024 * 1024,
+fn manifest() -> io::Result<Vec<u8>> {
+    http::get(
+        "github.com",
+        &format!("/{REPO}/releases/latest/download/update.json"),
+        64 * 1024,
         |_| {},
     )
-    .map_err(|e| e.to_string())?;
+}
+
+pub fn check() -> Result<Option<Update>, String> {
+    let bytes = manifest().or_else(|manifest_error| {
+        http::get(
+            "api.github.com",
+            &format!("/repos/{REPO}/releases/latest"),
+            1024 * 1024,
+            |_| {},
+        )
+        .map_err(|api_error| {
+            format!(
+                "无法获取发行信息。更新清单：{manifest_error}；备用接口：{api_error}。请稍后重试。"
+            )
+        })
+    })?;
     parse_release(
         &bytes,
         &Version::parse(env!("CARGO_PKG_VERSION")).expect("package version"),
@@ -168,13 +183,7 @@ mod tests {
     #[test]
     #[ignore = "live GitHub check for release validation; no installation"]
     fn live_release_download_verifies() {
-        let bytes = http::get(
-            "api.github.com",
-            &format!("/repos/{REPO}/releases/latest"),
-            1024 * 1024,
-            |_| {},
-        )
-        .unwrap();
+        let bytes = manifest().unwrap();
         let release = parse_release(&bytes, &Version::new(0, 0, 0))
             .unwrap()
             .unwrap();

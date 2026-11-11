@@ -1,5 +1,10 @@
 # Changelog
 
+## 3.2.1 — 2026-11-11
+
+- Check the latest stable release using its public `update.json` attachment so shared GitHub API rate limits do not block daily or manual checks. Keep the API as a fallback and continue verifying the download's size and SHA-256.
+- When publishing, run `tools/release-manifest.ps1 -Executable <versioned-release-exe>` and attach the generated `update.json` alongside the executable.
+
 ## 3.2.0 — 2026-11-11
 
 - Check for stable updates from the sidebar version, More menu or tray. Check once per local calendar day by default, persist the attempt across restarts, and allow manual checks or opting out. Background checks do not interrupt account work.
