@@ -73,7 +73,7 @@ pub fn replace(
                 backup.display()
             )),
         };
-        move_new(&staged, exe).map_err(&recover)?;
+        move_new(&staged, exe).map_err(recover)?;
         if let Err(error) = launch(exe) {
             // Never delete the last known good executable, even if an antivirus
             // or another process prevents moving the failed replacement away.
