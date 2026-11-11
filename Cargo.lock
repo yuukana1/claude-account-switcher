@@ -324,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "claude-account-switcher"
-version = "3.1.0"
+version = "3.1.1"
 dependencies = [
  "ab_glyph",
  "chrono",

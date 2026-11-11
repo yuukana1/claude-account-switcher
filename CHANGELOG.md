@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.1.1 — 2026-11-11
+
+- Browse account search results with the arrow keys. The highlighted result scrolls into view without switching accounts; Enter selects it. Pin and unpin directly on a sidebar row without changing the selection.
+- Review all selected conversations across searches, remove individual entries and return to the same query. Backing out of a running-account warning or choosing an unready destination preserves the draft.
+- On a partial copy, show only failed entries for retry and leave existing files intact. Refresh the destination after copying instead of rescanning every profile. Archived conversation titles now leave room for the archive label; hover to read the full title and folder.
+- Reveal the switcher when choosing Add Account from the tray, so the confirmation is visible even when the window was closed to the notification area.
+
 ## 3.1.0 — 2026-11-11
 
 - Find accounts by label, profile ID or email with Ctrl+F, and optionally show only running accounts. Search does not change the active account; Enter in the search box selects the first result and Esc restores the full list.

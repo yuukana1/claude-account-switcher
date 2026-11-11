@@ -6,6 +6,7 @@ mod draw;
 #[cfg(test)]
 mod interaction_tests;
 mod search;
+mod transfer;
 mod tray;
 
 use std::collections::HashMap;
@@ -48,18 +49,15 @@ pub struct Transfer {
     pub sessions: Vec<Session>,
     pub checked: Vec<bool>,
     filter: SessionFilter,
-}
-
-pub struct PendingCopy {
-    pub target_id: String,
-    pub sessions: Vec<Session>,
+    review: bool,
+    confirm_running: bool,
+    notice: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 pub enum DialogAction {
     None,
     Launch(String),
-    PerformCopy,
 }
 
 pub enum Dialog {
@@ -141,7 +139,6 @@ pub struct SwitcherApp {
     pub dialog: Dialog,
     pub toast: Option<Toast>,
     pub menu: Option<OpenMenu>,
-    pub pending_copy: Option<PendingCopy>,
 
     pub tray: Option<tray_icon::TrayIcon>,
     tray_signature: String,
@@ -313,7 +310,6 @@ impl SwitcherApp {
             dialog: Dialog::None,
             toast: None,
             menu: None,
-            pending_copy: None,
             tray: None,
             tray_signature: String::new(),
             next_tray_try: now,
@@ -1104,59 +1100,81 @@ impl SwitcherApp {
             filter: SessionFilter::new(&sessions),
             sessions,
             checked,
+            review: false,
+            confirm_running: false,
+            notice: None,
         }));
     }
 
-    pub fn perform_copy(&mut self, ctx: &egui::Context) {
-        let Some(pending) = self.pending_copy.take() else {
-            return;
-        };
-        let Some(target) = self.account(&pending.target_id).cloned() else {
+    fn perform_copy(&mut self, mut draft: Box<Transfer>, ctx: &egui::Context) {
+        draft.confirm_running = false;
+        let Some(target) = self.account(&draft.target_id).cloned() else {
+            draft.notice = Some("目标账号已不在列表中，请重新选择。".into());
+            self.dialog = Dialog::Transfer(draft);
             return;
         };
         let Some(store) = data::session_store(&self.install, &target) else {
-            self.show_message(
-                "目标账号尚未就绪",
-                format!(
-                    "'{}' 还没用过 Claude Code，对话没有可存放的位置。\n\n请先打开它、登录并进入 Code 页一次，然后再试。",
-                    target.name
-                ),
-                Tone::Warning,
-            );
+            draft.notice = Some(format!(
+                "「{}」还没有对话目录。请换一个目标，或先在该账号里打开一次 Code 后重试。",
+                target.name
+            ));
+            self.dialog = Dialog::Transfer(draft);
             return;
         };
         let mut copied = 0usize;
         let mut skipped = 0usize;
-        let mut failures: Vec<String> = Vec::new();
-        for session in &pending.sessions {
+        let mut first_error = None;
+        for (session, checked) in draft.sessions.iter().zip(&mut draft.checked) {
+            if !*checked {
+                continue;
+            }
             match data::copy_session(session, &store) {
                 Ok(true) => copied += 1,
                 Ok(false) => skipped += 1,
-                Err(error) => failures.push(error.to_string()),
+                Err(error) => {
+                    first_error.get_or_insert_with(|| error.to_string());
+                    continue;
+                }
+            }
+            *checked = false;
+        }
+        // Copying changes only the destination's session index. Rediscovering all
+        // profiles here also read the source history twice on every batch.
+        if copied > 0 {
+            if let Some(account) = self.accounts.iter_mut().find(|a| a.id == target.id) {
+                data::refresh_metadata(&self.install, account);
+            }
+            if self.selected_id == target.id {
+                self.refresh_usage(false);
             }
         }
-        self.refresh_meta();
-        self.reload_accounts(ctx);
-
-        if !failures.is_empty() {
-            self.show_message(
-                "转移失败",
-                format!(
-                    "已复制 {copied} 个，失败 {} 个。\n\n{}",
-                    failures.len(),
-                    failures.join("\n")
-                ),
-                Tone::Error,
-            );
+        ctx.request_repaint();
+        if let Some(error) = first_error {
+            let remaining = draft.checked.iter().filter(|&&v| v).count();
+            draft.notice = Some(format!("已复制 {copied} 个，跳过 {skipped} 个。清单保留了 {remaining} 个失败项，可重试。错误：{error}"));
+            draft.review = true;
+            self.dialog = Dialog::Transfer(draft);
             return;
         }
-        let mut body = format!("已复制 {copied} 个对话到 '{}'。", target.name);
-        if skipped > 0 {
+        let mut body = if copied == 0 {
+            format!(
+                "所选的 {skipped} 个对话在「{}」中都已存在，原有文件已保留。",
+                target.name
+            )
+        } else {
+            format!("已复制 {copied} 个对话到「{}」。", target.name)
+        };
+        if copied > 0 && skipped > 0 {
             body.push_str(&format!(" 另有 {skipped} 个已存在。"));
         }
         let running = target.running_pid.is_some();
         self.dialog = Dialog::Message {
-            title: "对话已复制".into(),
+            title: if copied == 0 {
+                "所选对话均已存在"
+            } else {
+                "对话已复制"
+            }
+            .into(),
             body,
             tone: Tone::Success,
             primary: if running {
@@ -1307,7 +1325,17 @@ impl SwitcherApp {
             (
                 i.key_pressed(egui::Key::ArrowUp),
                 i.key_pressed(egui::Key::ArrowDown),
-                i.key_pressed(egui::Key::Enter),
+                i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Key {
+                            key: egui::Key::Enter,
+                            pressed: true,
+                            repeat: false,
+                            ..
+                        }
+                    )
+                }),
                 i.key_pressed(egui::Key::F2),
                 i.key_pressed(egui::Key::Delete),
             )
@@ -1429,10 +1457,6 @@ impl SwitcherApp {
             DialogAction::Launch(id) => {
                 self.dialog = Dialog::None;
                 self.launch(&id, ctx);
-            }
-            DialogAction::PerformCopy => {
-                self.dialog = Dialog::None;
-                self.perform_copy(ctx);
             }
         }
     }

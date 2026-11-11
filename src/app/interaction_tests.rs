@@ -99,7 +99,7 @@ impl Fixture {
         );
     }
 
-    fn click_label(&mut self, label: &str) {
+    fn hover_label(&mut self, label: &str) -> Pos2 {
         self.frame(vec![]);
         let output = self.frame(vec![]);
         let pos = output
@@ -119,6 +119,11 @@ impl Fixture {
             })
             .unwrap_or_else(|| panic!("missing label: {label}"));
         self.frame(vec![Event::PointerMoved(pos)]);
+        pos
+    }
+
+    fn click_label(&mut self, label: &str) {
+        let pos = self.hover_label(label);
         for pressed in [true, false] {
             self.frame(vec![Event::PointerButton {
                 pos,
@@ -164,15 +169,15 @@ fn account_search_respects_focus_ime_and_hidden_selection() {
 #[test]
 fn pins_follow_profile_id_after_rename_and_unpin_restores_original_order() {
     let mut f = Fixture::new();
-    f.app
-        .apply_action(UiAction::TogglePin("Beta".into()), &f.ctx);
+    f.hover_label("工作");
+    f.click_label("置顶");
     assert_eq!(f.app.accounts[0].id, "Beta");
+    assert_eq!(f.app.selected_id, "Alpha");
     f.app.settings.set_label("Beta", Some("另一个名字"));
     f.app.settings.save().unwrap();
     let path = f.dir.path().join("settings.json");
     assert!(Settings::load(path.clone()).pinned("Beta"));
-    f.app
-        .apply_action(UiAction::TogglePin("Beta".into()), &f.ctx);
+    f.click_label("已置顶");
     assert_eq!(f.app.accounts[0].id, "Alpha");
     let reloaded = Settings::load(path);
     assert!(!reloaded.pinned("Beta"));
@@ -214,17 +219,138 @@ fn transfer_bulk_selection_keeps_hidden_files_and_confirms_the_right_target() {
     f.click_label("工作");
     f.click_label("设计");
     f.click_label("复制对话");
-    assert!(matches!(
-        f.app.dialog,
-        Dialog::Message {
-            action: DialogAction::PerformCopy,
-            ..
-        }
-    ));
-    let pending = f.app.pending_copy.as_ref().unwrap();
-    assert_eq!(pending.target_id, "Gamma");
-    assert_eq!(pending.sessions.len(), 1);
-    assert_eq!(pending.sessions[0].file, store.join("local_a.json"));
+    assert!(matches!(&f.app.dialog, Dialog::Transfer(t) if t.confirm_running));
+    f.click_label("返回选择");
+    let Dialog::Transfer(t) = &f.app.dialog else {
+        panic!("lost draft")
+    };
+    assert!(!t.confirm_running);
+    assert_eq!(t.target_id, "Gamma");
+    assert_eq!(t.filter.query, "second tools");
+    assert_eq!(
+        t.sessions
+            .iter()
+            .zip(&t.checked)
+            .filter_map(|(s, on)| on.then_some(&s.file))
+            .collect::<Vec<_>>(),
+        [&store.join("local_a.json")]
+    );
+    f.click_label("查看已选");
+    f.click_label("First");
+    let Dialog::Transfer(t) = &f.app.dialog else {
+        panic!("lost review")
+    };
+    assert!(t.review && !t.checked.iter().any(|on| *on));
+    f.key(Key::Escape, Modifiers::NONE);
+    assert!(
+        matches!(&f.app.dialog, Dialog::Transfer(t) if !t.review && t.filter.query == "second tools")
+    );
+    f.click_label("Second");
+    f.click_label("复制对话");
+    f.click_label("仍然复制");
+    assert!(
+        matches!(&f.app.dialog, Dialog::Transfer(t) if t.notice.is_some() && !t.confirm_running && t.checked.iter().filter(|&&v| v).count() == 1)
+    );
+    assert!(!f.dir.path().join("Gamma/claude-code-sessions").exists());
     f.click_label("取消");
-    assert!(f.app.pending_copy.is_none());
+    assert!(matches!(f.app.dialog, Dialog::None));
+}
+
+#[test]
+fn keyboard_browses_search_results_without_persisting_or_launching_until_chosen() {
+    let mut f = Fixture::new();
+    f.frame(vec![]);
+    f.key(Key::F, Modifiers::CTRL);
+    f.frame(vec![Event::Text("a".into())]); // both IDs match
+    assert_eq!(f.app.account_filter.cursor_id.as_deref(), Some("Alpha"));
+    f.key(Key::ArrowDown, Modifiers::NONE);
+    assert_eq!(f.app.account_filter.cursor_id.as_deref(), Some("Beta"));
+    assert_eq!(f.app.selected_id, "Alpha");
+    assert_eq!(f.app.settings.last_account(), None);
+    f.app.ime_composing = true;
+    f.key(Key::ArrowUp, Modifiers::NONE);
+    assert_eq!(f.app.account_filter.cursor_id.as_deref(), Some("Beta"));
+    f.app.ime_composing = false;
+    f.key(Key::Enter, Modifiers::NONE);
+    assert_eq!(f.app.settings.last_account().as_deref(), Some("Beta"));
+    assert!(matches!(f.app.dialog, Dialog::None));
+    assert!(f.app.toast.is_none());
+}
+
+#[test]
+fn partial_copy_retries_only_failed_files_and_never_overwrites_the_destination() {
+    let mut f = Fixture::new();
+    f.app.accounts[1].running_pid = None;
+    let source = f.dir.path().join("Alpha/claude-code-sessions/src/org");
+    let dest = f.dir.path().join("Beta/claude-code-sessions/dst/team");
+    for dir in [&source, &dest] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let valid = r#"{"title":"Notes","account":"src","org":"org"}"#;
+    for file in ["local_good.json", "local_old.json"] {
+        std::fs::write(source.join(file), valid).unwrap();
+    }
+    std::fs::write(source.join("local_fix.json"), "{broken").unwrap();
+    std::fs::write(dest.join("local_old.json"), "keep existing").unwrap();
+    f.app.open_transfer("Alpha");
+    f.click_label("全选当前结果");
+    f.click_label("复制对话");
+    let Dialog::Transfer(t) = &f.app.dialog else {
+        panic!("lost failed entries")
+    };
+    assert!(
+        t.review
+            && t.notice
+                .as_deref()
+                .unwrap()
+                .contains("已复制 1 个，跳过 1 个")
+    );
+    assert_eq!(
+        t.sessions
+            .iter()
+            .zip(&t.checked)
+            .filter_map(|(s, on)| on.then_some(&s.file))
+            .collect::<Vec<_>>(),
+        [&source.join("local_fix.json")]
+    );
+    assert!(!dest.join("local_fix.json").exists());
+    assert_eq!(f.app.accounts[1].session_count, 2);
+    std::fs::write(source.join("local_fix.json"), valid).unwrap();
+    f.click_label("复制对话");
+    assert!(
+        matches!(&f.app.dialog,Dialog::Message{title,body,..} if title=="对话已复制" && body.contains("已复制 1 个") && !body.contains("已存在"))
+    );
+    assert_eq!(
+        std::fs::read_to_string(dest.join("local_old.json")).unwrap(),
+        "keep existing"
+    );
+    let fixed: Value =
+        serde_json::from_slice(&std::fs::read(dest.join("local_fix.json")).unwrap()).unwrap();
+    assert_eq!(fixed["account"], "dst");
+    assert_eq!(fixed["org"], "team");
+    assert_eq!(f.app.accounts[1].session_count, 3);
+}
+
+#[test]
+fn keyboard_candidate_scrolls_into_view_in_a_long_account_list() {
+    let mut f = Fixture::new();
+    for num in 0..20 {
+        let mut account = f.app.accounts[0].clone();
+        account.id = format!("Team-{num:02}");
+        account.name = account.id.clone();
+        f.app.accounts.push(account);
+    }
+    f.frame(vec![]);
+    f.key(Key::F, Modifiers::CTRL);
+    f.frame(vec![Event::Text("team".into())]);
+    for _ in 1..20 {
+        f.key(Key::ArrowDown, Modifiers::NONE);
+    }
+    assert_eq!(f.app.account_filter.cursor_id.as_deref(), Some("Team-19"));
+    for _ in 0..40 {
+        f.frame(vec![]);
+    }
+    f.hover_label("Team-19"); // also checks the label is inside the viewport
+    f.key(Key::Enter, Modifiers::NONE);
+    assert_eq!(f.app.selected_id, "Team-19");
 }

@@ -195,6 +195,23 @@ impl SwitcherApp {
             Pos2::new(rect.left() + 12.0, add_rect.bottom() + 8.0),
             Vec2::new(rect.width() - 24.0, 30.0),
         );
+        let browsing = matches!(self.dialog, super::Dialog::None) && self.menu.is_none();
+        let arrow = if browsing
+            && !self.ime_recently_active()
+            && ui.memory(|m| m.has_focus(super::account_search_id()))
+        {
+            ui.input_mut(|i| {
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                    1
+                } else if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                    -1
+                } else {
+                    0
+                }
+            })
+        } else {
+            0
+        };
         let search = search_field(
             ui,
             search_rect,
@@ -204,9 +221,29 @@ impl SwitcherApp {
             &pal,
         );
         let visible = self.visible_accounts();
+        let previous = self.account_filter.cursor_id.take();
+        let mut cursor_moved = false;
+        if browsing && search.has_focus() && !visible.is_empty() {
+            let current = if search.changed() {
+                None
+            } else {
+                visible
+                    .iter()
+                    .position(|&i| Some(&self.accounts[i].id) == previous.as_ref())
+            };
+            let at = current
+                .unwrap_or(0)
+                .saturating_add_signed(arrow)
+                .min(visible.len() - 1);
+            let id = &self.accounts[visible[at]].id;
+            cursor_moved = previous.as_ref() != Some(id);
+            self.account_filter.cursor_id = Some(id.clone());
+        }
         let filtered =
             self.account_filter.running_only || !self.account_filter.query.trim().is_empty();
-        let count = if filtered {
+        let count = if search.has_focus() && !visible.is_empty() {
+            format!("{} 项 · ↑↓ 浏览 · Enter 选中", visible.len())
+        } else if filtered {
             format!("显示 {} / {} 个账号", visible.len(), self.accounts.len())
         } else {
             format!("{} 个账号", self.accounts.len())
@@ -218,15 +255,15 @@ impl SwitcherApp {
             ui_font(10.5),
             pal.muted,
         );
-        if search.has_focus()
-            && matches!(self.dialog, super::Dialog::None)
+        if browsing
+            && search.has_focus()
             && !self.ime_recently_active()
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
         {
-            if let Some(&i) = visible.first() {
-                self.select(self.accounts[i].id.clone(), ui.ctx());
+            if let Some(id) = self.account_filter.cursor_id.take() {
+                self.select(id.clone(), ui.ctx());
                 self.scroll_to_selected = true;
-                search.surrender_focus();
+                ui.memory_mut(|m| m.request_focus(super::account_row_id(&id)));
             }
         }
         let list_top = search_rect.bottom() + 8.0;
@@ -264,7 +301,7 @@ impl SwitcherApp {
                         });
                     }
                     for i in visible {
-                        let account = self.accounts[i].clone();
+                        let account = &self.accounts[i];
                         let (row_rect, _) = ui.allocate_exact_size(
                             Vec2::new(ui.available_width(), ROW_H),
                             Sense::hover(),
@@ -279,6 +316,14 @@ impl SwitcherApp {
                             response.scroll_to_me(None);
                             self.scroll_to_selected = false;
                         }
+                        let candidate = self.account_filter.cursor_id.as_ref() == Some(&account.id);
+                        if candidate && cursor_moved {
+                            response.scroll_to_me(None);
+                        }
+                        if !ui.is_rect_visible(row_rect) {
+                            continue;
+                        }
+                        let account = account.clone();
                         self.draw_sidebar_row(
                             ui,
                             row_rect,
@@ -287,6 +332,14 @@ impl SwitcherApp {
                             account.id == selected_id,
                             &mut actions,
                         );
+                        if candidate {
+                            ui.painter().rect_stroke(
+                                row_rect.shrink2(Vec2::new(2.0, 1.0)),
+                                8,
+                                Stroke::new(1.5, pal.accent),
+                                StrokeKind::Inside,
+                            );
+                        }
                     }
                     ui.allocate_space(Vec2::new(0.0, 6.0));
                 });
@@ -405,45 +458,75 @@ impl SwitcherApp {
         let text_x = avatar.right() + 10.0;
         let right_x = rect.right() - 16.0;
         let pinned = self.settings.pinned(&account.id);
-        if pinned {
-            painter.text(
-                Pos2::new(right_x - 13.0, rect.center().y - 8.0),
-                Align2::RIGHT_CENTER,
-                "置顶",
-                ui_font(9.5),
-                pal.accent_dark,
+        let show_pin = pinned || ui.rect_contains_pointer(rect);
+        if show_pin {
+            let chip = Rect::from_center_size(
+                Pos2::new(right_x - 32.0, rect.center().y - 8.0),
+                Vec2::new(42.0, 24.0),
             );
+            let pin = ui
+                .interact(chip, response.id.with("pin"), Sense::click())
+                .on_hover_cursor(CursorIcon::PointingHand);
+            painter.rect_filled(
+                chip.shrink2(Vec2::new(1.0, 3.0)),
+                5,
+                if pinned { pal.accent_soft } else { pal.chip },
+            );
+            painter.text(
+                chip.center(),
+                Align2::CENTER_CENTER,
+                if pinned { "已置顶" } else { "置顶" },
+                ui_font(10.0),
+                if pinned { pal.accent_dark } else { pal.muted },
+            );
+            if pin
+                .on_hover_text(if pinned {
+                    "取消置顶"
+                } else {
+                    "置顶到侧栏和托盘"
+                })
+                .clicked()
+            {
+                actions.push(UiAction::TogglePin(account.id.clone()));
+            }
         }
+        let full_title = self.row_heading(account);
         let title = theme::truncate(
             ui.ctx(),
-            &self.row_heading(account),
+            &full_title,
             &semi_font(12.4),
-            (right_x - text_x - if pinned { 40.0 } else { 20.0 }).max(60.0),
+            (right_x - text_x - if show_pin { 58.0 } else { 20.0 }).max(60.0),
         );
         painter.text(
             Pos2::new(text_x, rect.center().y - 8.0),
             Align2::LEFT_CENTER,
-            title,
+            &title,
             semi_font(12.4),
             pal.ink,
         );
-        let sub = self
+        let full_sub = self
             .account_email(&account.id)
             .map(|e| e.to_owned())
             .unwrap_or_else(|| format!("{} 个 Code 对话", account.session_count));
         let sub = theme::truncate(
             ui.ctx(),
-            &sub,
+            &full_sub,
             &ui_font(9.8),
             (right_x - text_x - 20.0).max(50.0),
         );
         painter.text(
             Pos2::new(text_x, rect.center().y + 9.0),
             Align2::LEFT_CENTER,
-            sub,
+            &sub,
             ui_font(9.8),
             pal.faint,
         );
+        if title != full_title || sub != full_sub {
+            response.clone().on_hover_ui(|ui| {
+                ui.label(full_title);
+                ui.weak(full_sub);
+            });
+        }
 
         if account.running_pid.is_some() {
             let pulse = 0.65 + 0.35 * breathe(self.time, 2.8);

@@ -10,7 +10,7 @@ It targets the **official Claude desktop app for Windows** (tested with 4.23118.
 ![Claude Account Switcher](dist/preview-light.png)
 *Screenshots use redacted account details.*
 
-Version 3.1 previews with sample profiles: [account search and pins](dist/preview-accounts-3.1.png) · [filtered conversation copying](dist/preview-transfer-3.1.png).
+Previews with sample profiles: [account search and pins](dist/preview-accounts-3.1.png) · [filtered conversation copying](dist/preview-transfer-3.1.png) · [reviewing a selection](dist/preview-selection-3.1.1.png).
 
 Two accounts running side by side:
 
@@ -19,11 +19,11 @@ Two accounts running side by side:
 ## Features
 
 - **Accounts** — lists the profiles already on this PC with e-mail, running state and Claude Code conversation count.
-- **Find an account** — press `Ctrl+F` to search labels, profile IDs or e-mail addresses. Words can match different fields. Filter to running accounts, press Enter in the search box to select the first match, or Esc to clear the filters.
-- **Pin accounts** — right-click an account to pin it at the top of both the sidebar and the tray menu. Pins survive restarts and renaming.
+- **Find an account** — press `Ctrl+F` to search labels, profile IDs or e-mail addresses. Words can match different fields. Filter to running accounts, use the arrow keys to browse matches, press Enter to select one, or Esc to clear the filters.
+- **Pin accounts** — hover over an account and click its pin, or use its context menu. Pins apply to the sidebar and tray menu and survive restarts and renaming.
 - **Usage** — live 5-hour / weekly usage, reset countdown, and a warning shortly before a reset.
 - **Switching** — opens or focuses an account in its own window, and copies Claude Code conversations between accounts.
-- **Batch copy** — search conversations by title or folder. Select all matching results, change the search to add more, then choose a destination from the dropdown. The footer counts selections outside the current filter before you copy.
+- **Batch copy** — select conversations across several searches, review the full selection and remove individual entries before copying. Returning from confirmation or choosing an unready destination keeps your draft. After a partial copy, only failed entries remain selected for retry.
 - **Taskbar** — each secondary account has its own taskbar group, with its avatar in a corner of the Claude icon (or its initial/color if no avatar is set). Already-running windows are updated without restarting Claude. Keep the switcher running in the tray so it can also tag new windows.
 - **Personal** — avatar and nickname per account; light and dark themes.
 - **Removal** — permanently removes a selected non-default profile after confirmation, including its local conversations. Back up anything you need first.

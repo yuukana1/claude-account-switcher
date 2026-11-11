@@ -54,7 +54,7 @@ pub(super) fn install_tray_handlers(ctx: &egui::Context) {
         if id == "quit" {
             std::process::exit(0);
         }
-        if id == "show" {
+        if id == "show" || id == "add" {
             crate::win::reveal_main_window();
         }
         if let Ok(mut queue) = menu_queue().lock() {

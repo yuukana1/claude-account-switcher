@@ -4,6 +4,7 @@ use crate::data::{Account, Session};
 pub(super) struct AccountFilter {
     pub query: String,
     pub running_only: bool,
+    pub cursor_id: Option<String>,
 }
 
 impl AccountFilter {
