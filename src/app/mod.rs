@@ -3,6 +3,9 @@
 
 mod dialogs;
 mod draw;
+#[cfg(test)]
+mod interaction_tests;
+mod search;
 mod tray;
 
 use std::collections::HashMap;
@@ -19,6 +22,7 @@ use crate::identity::{self, read_avatar_image, Identity};
 use crate::settings::Settings;
 use crate::theme;
 use crate::win::{self, ProcessInfo};
+use search::{AccountFilter, SessionFilter};
 
 pub const WINDOW_W: f32 = 1000.0;
 pub const WINDOW_H: f32 = 624.0;
@@ -43,7 +47,7 @@ pub struct Transfer {
     pub target_id: String,
     pub sessions: Vec<Session>,
     pub checked: Vec<bool>,
-    pub hover: Option<usize>,
+    filter: SessionFilter,
 }
 
 pub struct PendingCopy {
@@ -101,6 +105,7 @@ pub struct OpenMenu {
 pub enum UiAction {
     Launch(String),
     Select(String),
+    TogglePin(String),
     AddAccount,
     Rename(String),
     Delete(String),
@@ -118,6 +123,8 @@ pub struct SwitcherApp {
     pub settings: Settings,
     pub install: Install,
     pub accounts: Vec<Account>,
+    account_filter: AccountFilter,
+    scroll_to_selected: bool,
     pub selected_id: String,
     pub usage: Option<Usage>,
     pub bar_fh: Blend,
@@ -201,91 +208,28 @@ impl SwitcherApp {
             settings.set_install_cache(&install);
         }
         let mut accounts = data::discover_accounts(&install, &mut settings);
+        sort_accounts(&mut accounts, &settings);
         for account in &mut accounts {
             data::refresh_metadata(&install, account);
         }
         let settings_error = settings.save().err().map(|error| error.to_string());
 
-        let selected_id = settings
-            .last_account()
-            .filter(|id| accounts.iter().any(|account| &account.id == id))
-            .unwrap_or_else(|| {
-                accounts
-                    .first()
-                    .map(|a| a.id.clone())
-                    .unwrap_or_else(|| DEFAULT_ID.to_owned())
-            });
         let startup = win::startup_enabled(&win::current_exe());
         if startup {
             // Keep the Run entry pointing at the current portable exe location.
             let _ = win::set_startup(true, &win::current_exe());
         }
 
-        let (tx, rx) = channel();
-        let now = Instant::now();
-
-        let texture = |size: u32, name: &str, rgba: Vec<u8>| {
-            let image =
-                egui::ColorImage::from_rgba_unmultiplied([size as usize, size as usize], &rgba);
-            cc.egui_ctx
-                .load_texture(name.to_owned(), image, egui::TextureOptions::LINEAR)
-        };
-        let logo_large = texture(128, "logo-large", theme::icon_rgba(128));
-        let logo_small = texture(48, "logo-small", theme::icon_rgba(48));
-        let mark = texture(128, "starburst-mark", theme::starburst_rgba(128));
-
-        let mut app = Self {
+        let mut app = Self::from_accounts(
+            &cc.egui_ctx,
             settings,
             install,
             accounts,
-            selected_id,
-            usage: None,
-            bar_fh: Blend::new(0.0, 0.55),
-            bar_sd: Blend::new(0.0, 0.55),
-            bar_owner: String::new(),
             pal,
-            logo_large,
-            logo_small,
-            mark,
-            identity: HashMap::new(),
-            recent_sessions: Vec::new(),
-            avatar_textures: HashMap::new(),
-            dialog: Dialog::None,
-            toast: None,
-            menu: None,
-            pending_copy: None,
-            tray: None,
-            tray_signature: String::new(),
-            next_tray_try: now,
-            ime_composing: false,
-            ime_composing_prev: false,
-            ime_commit_at: None,
-            proc_map: HashMap::new(),
-            known_pids: Vec::new(),
-            tx,
-            rx,
-            querying: false,
-            pending_query_at: None,
-            next_poll: now,
-            next_taskbar: now,
-            taskbar_icons: crate::taskbar_icon::IconCache::new(
-                paths.switcher.join("taskbar-icons"),
-            ),
-            next_full_query: now,
-            next_meta: now,
-            next_identity: now + Duration::from_secs(30),
-            next_watch: now + Duration::from_secs(60),
-            started: now,
-            time: 0.0,
-            animate_until: now,
-            motion: win::animations_enabled(),
-            startup,
-            quit: false,
-            styled: false,
-            tray_hint_pending: false,
-            settings_error,
-        };
-
+            paths.switcher.join("taskbar-icons"),
+        );
+        app.startup = startup;
+        app.settings_error = settings_error;
         app.refresh_usage(false);
         app.load_identities_in(Some(&cc.egui_ctx));
         app.spawn_query(&cc.egui_ctx);
@@ -319,6 +263,88 @@ impl SwitcherApp {
         app
     }
 
+    fn from_accounts(
+        ctx: &egui::Context,
+        settings: Settings,
+        install: Install,
+        accounts: Vec<Account>,
+        pal: theme::Palette,
+        icon_dir: std::path::PathBuf,
+    ) -> Self {
+        let selected_id = settings
+            .last_account()
+            .filter(|id| accounts.iter().any(|account| &account.id == id))
+            .unwrap_or_else(|| {
+                accounts
+                    .first()
+                    .map(|a| a.id.clone())
+                    .unwrap_or_else(|| DEFAULT_ID.to_owned())
+            });
+        let (tx, rx) = channel();
+        let now = Instant::now();
+
+        let texture = |size: u32, name: &str, rgba: Vec<u8>| {
+            let image =
+                egui::ColorImage::from_rgba_unmultiplied([size as usize, size as usize], &rgba);
+            ctx.load_texture(name.to_owned(), image, egui::TextureOptions::LINEAR)
+        };
+        let logo_large = texture(128, "logo-large", theme::icon_rgba(128));
+        let logo_small = texture(48, "logo-small", theme::icon_rgba(48));
+        let mark = texture(128, "starburst-mark", theme::starburst_rgba(128));
+
+        Self {
+            settings,
+            install,
+            accounts,
+            account_filter: AccountFilter::default(),
+            scroll_to_selected: true,
+            selected_id,
+            usage: None,
+            bar_fh: Blend::new(0.0, 0.55),
+            bar_sd: Blend::new(0.0, 0.55),
+            bar_owner: String::new(),
+            pal,
+            logo_large,
+            logo_small,
+            mark,
+            identity: HashMap::new(),
+            recent_sessions: Vec::new(),
+            avatar_textures: HashMap::new(),
+            dialog: Dialog::None,
+            toast: None,
+            menu: None,
+            pending_copy: None,
+            tray: None,
+            tray_signature: String::new(),
+            next_tray_try: now,
+            ime_composing: false,
+            ime_composing_prev: false,
+            ime_commit_at: None,
+            proc_map: HashMap::new(),
+            known_pids: Vec::new(),
+            tx,
+            rx,
+            querying: false,
+            pending_query_at: None,
+            next_poll: now,
+            next_taskbar: now,
+            taskbar_icons: crate::taskbar_icon::IconCache::new(icon_dir),
+            next_full_query: now,
+            next_meta: now,
+            next_identity: now + Duration::from_secs(30),
+            next_watch: now + Duration::from_secs(60),
+            started: now,
+            time: 0.0,
+            animate_until: now,
+            motion: win::animations_enabled(),
+            startup: false,
+            quit: false,
+            styled: false,
+            tray_hint_pending: false,
+            settings_error: None,
+        }
+    }
+
     // ------------------------------------------------------------ selection ----
 
     fn save_settings(&mut self) {
@@ -331,6 +357,19 @@ impl SwitcherApp {
 
     pub fn account(&self, id: &str) -> Option<&Account> {
         self.accounts.iter().find(|a| a.id == id)
+    }
+
+    fn visible_accounts(&self) -> Vec<usize> {
+        let query = self.account_filter.query.trim().to_lowercase();
+        self.accounts
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| {
+                self.account_filter
+                    .matches(a, self.account_email(&a.id), &query)
+            })
+            .map(|(i, _)| i)
+            .collect()
     }
 
     pub fn select(&mut self, id: String, ctx: &egui::Context) {
@@ -400,6 +439,7 @@ impl SwitcherApp {
 
     pub fn reload_accounts(&mut self, ctx: &egui::Context) {
         let mut accounts = data::discover_accounts(&self.install, &mut self.settings);
+        sort_accounts(&mut accounts, &self.settings);
         for account in &mut accounts {
             data::refresh_metadata(&self.install, account);
             account.running_pid = self.proc_map.get(&data::running_key(account)).copied();
@@ -870,6 +910,14 @@ impl SwitcherApp {
         let Some(account) = self.account(id).cloned() else {
             return;
         };
+        if !self.account_filter.matches(
+            &account,
+            self.account_email(id),
+            &self.account_filter.query.trim().to_lowercase(),
+        ) {
+            self.account_filter = AccountFilter::default();
+        }
+        self.scroll_to_selected = true;
         self.select(account.id.clone(), ctx);
 
         if let Some(pid) = account.running_pid {
@@ -936,6 +984,8 @@ impl SwitcherApp {
             .join(format!("{}{}", data::PROFILE_PREFIX, name));
         match win::launch_profile(&self.install, &path) {
             Ok(()) => {
+                self.account_filter = AccountFilter::default();
+                self.scroll_to_selected = true;
                 self.reload_accounts(ctx);
                 self.select(name.to_owned(), ctx);
                 self.toast(format!("已创建 '{name}'，正在打开登录窗口…"), Tone::Success);
@@ -997,6 +1047,7 @@ impl SwitcherApp {
             Ok(()) => {
                 self.settings.set_label(&account.id, None);
                 self.settings.forget_color(&account.id);
+                self.settings.set_pinned(&account.id, false);
                 self.save_settings();
                 self.reload_accounts(ctx);
                 self.toast(format!("已删除 '{}'。", account.name), Tone::Success);
@@ -1050,9 +1101,9 @@ impl SwitcherApp {
         self.dialog = Dialog::Transfer(Box::new(Transfer {
             source_id: source.id,
             target_id: targets[0].id.clone(),
+            filter: SessionFilter::new(&sessions),
             sessions,
             checked,
-            hover: None,
         }));
     }
 
@@ -1229,7 +1280,29 @@ impl SwitcherApp {
         if !matches!(self.dialog, Dialog::None) {
             return;
         }
-        let new = take_add_account_shortcut(ctx);
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::F)) {
+            self.menu = None;
+            ctx.memory_mut(|m| m.request_focus(account_search_id()));
+            return;
+        }
+        if self.menu.is_some() {
+            return;
+        }
+        if take_add_account_shortcut(ctx) {
+            self.request_add_account();
+            return;
+        }
+        if !self.ime_recently_active()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            self.account_filter = AccountFilter::default();
+            ctx.memory_mut(|m| m.surrender_focus(account_search_id()));
+            self.scroll_to_selected = true;
+            return;
+        }
+        if ctx.memory(|m| m.has_focus(account_search_id())) || self.ime_recently_active() {
+            return;
+        }
         let (up, down, enter, rename, delete) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::ArrowUp),
@@ -1239,20 +1312,37 @@ impl SwitcherApp {
                 i.key_pressed(egui::Key::Delete),
             )
         });
+        if !(up || down || enter || rename || delete) {
+            return;
+        }
+        let visible = self.visible_accounts();
+        let current = visible
+            .iter()
+            .position(|&i| self.accounts[i].id == self.selected_id);
         if up || down {
-            if let Some(index) = self.accounts.iter().position(|a| a.id == self.selected_id) {
-                let next = if up {
-                    index.saturating_sub(1)
+            let next = current.map_or(0, |i| {
+                if up {
+                    i.saturating_sub(1)
                 } else {
-                    (index + 1).min(self.accounts.len().saturating_sub(1))
-                };
-                if let Some(account) = self.accounts.get(next) {
-                    self.select(account.id.clone(), ctx);
+                    (i + 1).min(visible.len() - 1)
                 }
+            });
+            if let Some(&i) = visible.get(next) {
+                self.select(self.accounts[i].id.clone(), ctx);
+                ctx.memory_mut(|m| m.request_focus(account_row_id(&self.selected_id)));
+                self.scroll_to_selected = true;
             }
+            return;
+        }
+        if current.is_none() {
+            return;
         }
         if enter {
-            self.launch(&self.selected_id.clone(), ctx);
+            let focused = ctx.memory(|m| m.focused());
+            if focused.is_none() || focused == Some(account_row_id(&self.selected_id)) {
+                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                self.launch(&self.selected_id.clone(), ctx);
+            }
         }
         if rename {
             if let Some(account) = self.selected() {
@@ -1273,9 +1363,6 @@ impl SwitcherApp {
                 }
             }
         }
-        if new {
-            self.request_add_account();
-        }
     }
 
     /// True when the IME was composing very recently, meaning the next Enter keypress is
@@ -1295,6 +1382,13 @@ impl SwitcherApp {
         match action {
             UiAction::Launch(id) => self.launch(&id, ctx),
             UiAction::Select(id) => self.select(id, ctx),
+            UiAction::TogglePin(id) => {
+                let pinned = !self.settings.pinned(&id);
+                self.settings.set_pinned(&id, pinned);
+                self.save_settings();
+                sort_accounts(&mut self.accounts, &self.settings);
+                self.rebuild_tray();
+            }
             UiAction::AddAccount => self.request_add_account(),
             UiAction::Rename(id) => {
                 if let Some(account) = self.account(&id).cloned() {
@@ -1478,6 +1572,23 @@ fn take_add_account_shortcut(ctx: &egui::Context) -> bool {
             egui::Key::N,
         ))
     })
+}
+
+fn account_search_id() -> egui::Id {
+    egui::Id::new("account_search")
+}
+
+fn account_row_id(id: &str) -> egui::Id {
+    egui::Id::new(("account_row", id))
+}
+
+fn sort_accounts(accounts: &mut [Account], settings: &Settings) {
+    accounts.sort_by(|a, b| {
+        settings
+            .pinned(&b.id)
+            .cmp(&settings.pinned(&a.id))
+            .then_with(|| a.id.cmp(&b.id))
+    });
 }
 
 #[cfg(test)]

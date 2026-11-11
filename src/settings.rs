@@ -135,6 +135,26 @@ impl Settings {
         }
     }
 
+    pub fn pinned(&self, id: &str) -> bool {
+        self.object("PinnedAccounts")
+            .and_then(|pins| pins.get(id))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    pub fn set_pinned(&mut self, id: &str, pinned: bool) {
+        if self.pinned(id) == pinned {
+            return;
+        }
+        let pins = self.object_mut("PinnedAccounts");
+        if pinned {
+            pins.insert(id.to_owned(), Value::Bool(true));
+        } else {
+            pins.remove(id);
+        }
+        self.dirty = true;
+    }
+
     // ---- avatar colours ----
 
     pub fn color_index(&self, id: &str) -> Option<usize> {

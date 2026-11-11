@@ -588,16 +588,19 @@ pub fn circle_image(
     let radius = rect.width() * 0.5;
     let steps = 64usize;
     let mut mesh = Mesh::with_texture(texture.id());
-    mesh.colored_vertex(center, Color32::WHITE);
-    // UV of the centre is (0.5, 0.5); the unit square maps onto the circle.
-    mesh.vertices.last_mut().expect("centre").uv = Pos2::new(0.5, 0.5);
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: center,
+        uv: Pos2::new(0.5, 0.5),
+        color: Color32::WHITE,
+    });
     for i in 0..=steps {
         let a = i as f32 / steps as f32 * std::f32::consts::TAU;
         let (s, c) = (a.sin(), a.cos());
-        mesh.colored_vertex(center + Vec2::new(c, s) * radius, Color32::WHITE);
-        if let Some(v) = mesh.vertices.last_mut() {
-            v.uv = Pos2::new(0.5 + c * 0.5, 0.5 + s * 0.5);
-        }
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: center + Vec2::new(c, s) * radius,
+            uv: Pos2::new(0.5 + c * 0.5, 0.5 + s * 0.5),
+            color: Color32::WHITE,
+        });
     }
     for i in 0..steps {
         mesh.add_triangle(0, 1 + i as u32, 2 + i as u32);

@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.1.0 — 2026-11-11
+
+- Find accounts by label, profile ID or email with Ctrl+F, and optionally show only running accounts. Search does not change the active account; Enter in the search box selects the first result and Esc restores the full list.
+- Pin frequently used profiles from their context menu. Pins use the profile ID, persist across renames and restarts, and apply in the sidebar and notification-area menu.
+- Search conversations by title and folder when copying. Bulk selection applies to the current results and preserves earlier choices. The picker shows how many selected conversations are hidden, scrolls long lists, and keeps long destination names inside a dropdown.
+- Fix a debug-build panic when drawing the default account logo or a custom avatar.
+
+Validated on Windows with 41 tests, including keyboard input, cross-filter selection and switching the destination before confirming a copy. Native window previews use sample profiles; no signed-in account was used for this validation.
+
 ## 3.0.2 — 2026-11-09
 
 - Restore a separate taskbar group for each secondary account. The switcher applies a stable per-profile AppUserModelID to existing and newly created Claude windows, including while it is in the tray. The default account keeps Claude's original identity.

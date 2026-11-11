@@ -73,6 +73,11 @@ impl SwitcherApp {
     fn tray_signature(&self) -> String {
         let mut signature = String::new();
         for account in &self.accounts {
+            signature.push(if self.settings.pinned(&account.id) {
+                '*'
+            } else {
+                ' '
+            });
             signature.push_str(&account.id);
             signature.push('|');
             signature.push_str(&account.name);
@@ -95,6 +100,12 @@ impl SwitcherApp {
                 format!("{}   ·   运行中", account.name)
             } else {
                 account.name.clone()
+            };
+            let text = text.replace('&', "&&");
+            let text = if self.settings.pinned(&account.id) {
+                format!("★  {text}")
+            } else {
+                text
             };
             let item = MenuItem::with_id(format!("acct:{}", account.id), text, true, None);
             let _ = menu.append(&item);

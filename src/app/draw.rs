@@ -158,12 +158,15 @@ impl SwitcherApp {
             pal.muted,
         );
 
-        painter.text(
-            Pos2::new(rect.left() + 20.0, rect.top() + 56.0),
-            Align2::LEFT_CENTER,
-            format!("{} 个账号", self.accounts.len()),
-            ui_font(10.0),
-            pal.faint,
+        let running_filter = ui.put(
+            Rect::from_min_size(
+                Pos2::new(rect.right() - 100.0, rect.top() + 46.0),
+                Vec2::new(88.0, 21.0),
+            ),
+            egui::Checkbox::new(
+                &mut self.account_filter.running_only,
+                egui::RichText::new("仅运行中").font(ui_font(10.5)),
+            ),
         );
 
         // A full-width, labelled action: an icon-only "+" hid the entry point.
@@ -188,14 +191,51 @@ impl SwitcherApp {
         }
         let _ = add.on_hover_text("在新的独立目录里登录另一个账号（Ctrl+N）");
 
-        let list_top = rect.top() + 114.0;
+        let search_rect = Rect::from_min_size(
+            Pos2::new(rect.left() + 12.0, add_rect.bottom() + 8.0),
+            Vec2::new(rect.width() - 24.0, 30.0),
+        );
+        let search = search_field(
+            ui,
+            search_rect,
+            super::account_search_id(),
+            &mut self.account_filter.query,
+            "搜索账号或邮箱  ·  Ctrl+F",
+            &pal,
+        );
+        let visible = self.visible_accounts();
+        let filtered =
+            self.account_filter.running_only || !self.account_filter.query.trim().is_empty();
+        let count = if filtered {
+            format!("显示 {} / {} 个账号", visible.len(), self.accounts.len())
+        } else {
+            format!("{} 个账号", self.accounts.len())
+        };
+        painter.text(
+            Pos2::new(rect.left() + 20.0, rect.top() + 56.0),
+            Align2::LEFT_CENTER,
+            count,
+            ui_font(10.5),
+            pal.muted,
+        );
+        if search.has_focus()
+            && matches!(self.dialog, super::Dialog::None)
+            && !self.ime_recently_active()
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+        {
+            if let Some(&i) = visible.first() {
+                self.select(self.accounts[i].id.clone(), ui.ctx());
+                self.scroll_to_selected = true;
+                search.surrender_focus();
+            }
+        }
+        let list_top = search_rect.bottom() + 8.0;
         let footer_top = rect.bottom() - 62.0;
         let list_rect = Rect::from_min_max(
             Pos2::new(rect.left(), list_top),
             Pos2::new(rect.right(), footer_top),
         );
 
-        let accounts = self.accounts.clone();
         let selected_id = self.selected_id.clone();
         let mut actions: Vec<UiAction> = Vec::new();
 
@@ -204,29 +244,52 @@ impl SwitcherApp {
             |ui| {
                 ui.set_width(list_rect.width() - 16.0);
                 ui.set_clip_rect(list_rect);
-                egui::ScrollArea::vertical()
+                let mut scroll = egui::ScrollArea::vertical()
                     .id_salt("account_list")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.set_width(list_rect.width() - 20.0);
-                        ui.spacing_mut().item_spacing.y = 2.0;
-                        for account in &accounts {
-                            let (row_rect, response) = ui.allocate_exact_size(
-                                Vec2::new(ui.available_width(), ROW_H),
-                                Sense::click(),
-                            );
-                            let response = response.on_hover_cursor(CursorIcon::PointingHand);
-                            self.draw_sidebar_row(
-                                ui,
-                                row_rect,
-                                &response,
-                                account,
-                                account.id == selected_id,
-                                &mut actions,
-                            );
+                    .auto_shrink([false, false]);
+                if search.changed() || running_filter.changed() {
+                    scroll = scroll.vertical_scroll_offset(0.0);
+                }
+                scroll.show(ui, |ui| {
+                    ui.set_width(list_rect.width() - 20.0);
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    if visible.is_empty() {
+                        ui.add_space(16.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(egui::RichText::new("没有符合条件的账号").color(pal.muted));
+                            if ui.link("清除筛选").clicked() {
+                                self.account_filter = Default::default();
+                                self.scroll_to_selected = true;
+                            }
+                        });
+                    }
+                    for i in visible {
+                        let account = self.accounts[i].clone();
+                        let (row_rect, _) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), ROW_H),
+                            Sense::hover(),
+                        );
+                        let response = ui.interact(
+                            row_rect,
+                            super::account_row_id(&account.id),
+                            Sense::click(),
+                        );
+                        let response = response.on_hover_cursor(CursorIcon::PointingHand);
+                        if self.scroll_to_selected && account.id == selected_id {
+                            response.scroll_to_me(None);
+                            self.scroll_to_selected = false;
                         }
-                        ui.allocate_space(Vec2::new(0.0, 6.0));
-                    });
+                        self.draw_sidebar_row(
+                            ui,
+                            row_rect,
+                            &response,
+                            &account,
+                            account.id == selected_id,
+                            &mut actions,
+                        );
+                    }
+                    ui.allocate_space(Vec2::new(0.0, 6.0));
+                });
             },
         );
 
@@ -341,11 +404,21 @@ impl SwitcherApp {
 
         let text_x = avatar.right() + 10.0;
         let right_x = rect.right() - 16.0;
+        let pinned = self.settings.pinned(&account.id);
+        if pinned {
+            painter.text(
+                Pos2::new(right_x - 13.0, rect.center().y - 8.0),
+                Align2::RIGHT_CENTER,
+                "置顶",
+                ui_font(9.5),
+                pal.accent_dark,
+            );
+        }
         let title = theme::truncate(
             ui.ctx(),
             &self.row_heading(account),
             &semi_font(12.4),
-            (right_x - text_x - 20.0).max(60.0),
+            (right_x - text_x - if pinned { 40.0 } else { 20.0 }).max(60.0),
         );
         painter.text(
             Pos2::new(text_x, rect.center().y - 8.0),
@@ -472,6 +545,20 @@ impl SwitcherApp {
             );
             return;
         };
+        if !self.account_filter.matches(
+            &account,
+            self.account_email(&account.id),
+            &self.account_filter.query.trim().to_lowercase(),
+        ) {
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                "请在左侧选择账号，或清除筛选",
+                ui_font(13.0),
+                pal.muted,
+            );
+            return;
+        }
 
         let content = Rect::from_min_max(
             Pos2::new(rect.left() + 30.0, rect.top() + 24.0),
@@ -1094,6 +1181,21 @@ impl SwitcherApp {
                         action: UiAction::Launch(account.id.clone()),
                     },
                     MenuItem {
+                        label: if self.settings.pinned(&id) {
+                            "取消置顶"
+                        } else {
+                            "置顶账号"
+                        }
+                        .into(),
+                        shortcut: None,
+                        enabled: true,
+                        danger: false,
+                        checked: self.settings.pinned(&id),
+                        bold: false,
+                        sep_before: false,
+                        action: UiAction::TogglePin(id.clone()),
+                    },
+                    MenuItem {
                         label: "重命名…".into(),
                         shortcut: Some("F2".into()),
                         enabled: true,
@@ -1327,6 +1429,58 @@ impl SwitcherApp {
 }
 
 // ---------------------------------------------------------------- helpers ----
+
+pub(super) fn search_field(
+    ui: &mut Ui,
+    rect: Rect,
+    id: Id,
+    query: &mut String,
+    hint: &str,
+    pal: &Palette,
+) -> Response {
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(7), pal.surface);
+    let mut input_rect = rect.shrink2(Vec2::new(9.0, 3.0));
+    input_rect.max.x -= 23.0;
+    let mut response = ui.place(
+        input_rect,
+        egui::TextEdit::singleline(query)
+            .id(id)
+            .font(ui_font(12.0))
+            .hint_text(hint)
+            .frame(false)
+            .return_key(None)
+            .vertical_align(egui::Align::Center),
+    );
+    if !query.is_empty() {
+        let clear = Rect::from_center_size(
+            Pos2::new(rect.right() - 16.0, rect.center().y),
+            Vec2::splat(25.0),
+        );
+        if icon_button(ui, clear, theme::icon_close, pal)
+            .on_hover_text("清除搜索")
+            .clicked()
+        {
+            query.clear();
+            response.mark_changed();
+            response.request_focus();
+        }
+    }
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(7),
+        Stroke::new(
+            1.0,
+            if response.has_focus() {
+                pal.accent
+            } else {
+                pal.border
+            },
+        ),
+        StrokeKind::Inside,
+    );
+    response
+}
 
 fn menu_reserved_height() -> f32 {
     10.0 + 7.0 * 28.0 + 3.0 * 9.0
