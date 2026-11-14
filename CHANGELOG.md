@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.2.2 — Unreleased
+## 3.2.2 — 2026-11-14
 
 - Start silently in the notification area at sign-in. Migrate existing enabled Run entries to `--background`, keep manual opening unchanged, and do not focus an existing window on a second background invocation. Restore a visible window without focus if tray creation fails.
 - Resolve the current user's registered Store package before launching, even when an old executable still exists after an update. Preserve existing profile paths.
