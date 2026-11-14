@@ -144,6 +144,7 @@ pub struct SwitcherApp {
     pub menu: Option<OpenMenu>,
 
     pub tray: Option<tray_icon::TrayIcon>,
+    background_pending: bool,
     tray_signature: String,
     next_tray_try: Instant,
 
@@ -185,7 +186,7 @@ pub struct SwitcherApp {
 }
 
 impl SwitcherApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, background: bool) -> Self {
         theme::install_fonts(&cc.egui_ctx);
 
         let paths = paths();
@@ -247,6 +248,7 @@ impl SwitcherApp {
         tray::install_tray_handlers(&cc.egui_ctx);
 
         app.rebuild_tray();
+        app.background_pending = background;
         let startup_dir = paths
             .roaming
             .join("Microsoft/Windows/Start Menu/Programs/Startup");
@@ -315,6 +317,7 @@ impl SwitcherApp {
             toast: None,
             menu: None,
             tray: None,
+            background_pending: false,
             tray_signature: String::new(),
             next_tray_try: now,
             ime_composing: false,
@@ -945,11 +948,15 @@ impl SwitcherApp {
     /// Claude's Store updates replace the versioned MSIX folder. Re-resolve the install
     /// before launching instead of failing on the path cached at start-up.
     fn ensure_install(&mut self, ctx: &egui::Context) {
-        if self.install.available() {
+        if self.install.kind == data::InstallKind::Classic && self.install.available() {
             return;
         }
         let fresh = data::discover_install(None);
-        if fresh.available() {
+        if fresh.available()
+            && (fresh.exe != self.install.exe
+                || fresh.version != self.install.version
+                || fresh.aumid != self.install.aumid)
+        {
             self.install = fresh;
             self.settings.set_install_cache(&self.install);
             self.save_settings();
@@ -1203,7 +1210,7 @@ impl SwitcherApp {
                 self.startup = enable;
                 self.toast(
                     if enable {
-                        "已开启开机自动启动。"
+                        "已开启开机静默启动，启动时仅驻留托盘。"
                     } else {
                         "已关闭开机自动启动。"
                     },
@@ -1273,6 +1280,32 @@ impl SwitcherApp {
     pub fn quit(&mut self, ctx: &egui::Context) {
         self.quit = true;
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    fn finish_background_start(&mut self, ctx: &egui::Context) {
+        if !self.background_pending {
+            return;
+        }
+        // eframe reapplies its initial native styles after its first paint.
+        // The viewport starts off-screen, inactive and outside the taskbar;
+        // finish the tray transition once that initial paint has completed.
+        let settle = Duration::from_millis(200);
+        if self.started.elapsed() < settle {
+            ctx.request_repaint_after(settle - self.started.elapsed().min(settle));
+            return;
+        }
+        // Never leave an inaccessible off-screen window if the tray could not
+        // be created. The fallback window is shown without taking focus.
+        let ready = if self.has_tray() {
+            win::start_in_tray()
+        } else {
+            win::show_main_window_without_focus()
+        };
+        if ready {
+            self.background_pending = false;
+        } else {
+            ctx.request_repaint();
+        }
     }
 
     fn handle_close(&mut self, ctx: &egui::Context) {
@@ -1470,6 +1503,7 @@ impl SwitcherApp {
 
 impl eframe::App for SwitcherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.finish_background_start(ctx);
         let dt = crate::anim::dt(ctx);
         if self.motion {
             self.time += dt;

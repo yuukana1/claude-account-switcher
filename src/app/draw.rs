@@ -1366,7 +1366,7 @@ impl SwitcherApp {
                     action: UiAction::ToggleTheme,
                 },
                 MenuItem {
-                    label: "开机自动启动".into(),
+                    label: "开机静默启动".into(),
                     shortcut: None,
                     enabled: true,
                     danger: false,

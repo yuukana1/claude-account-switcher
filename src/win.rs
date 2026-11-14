@@ -5,8 +5,8 @@
 //! Two notes on safety:
 //! - Claude's command line is read with a read-only kernel query (`NtQueryInformationProcess`)
 //!   for the same user's processes, never through a shell.
-//! - Launches go through `ShellExecuteW` with validated local paths and fixed verbs; no
-//!   user-supplied text is ever composed into a shell command line.
+//! - Launches use package activation or `ShellExecuteExW` with validated paths and
+//!   fixed verbs. User input is never evaluated as shell code.
 
 use std::ffi::{c_void, OsStr, OsString};
 use std::io;
@@ -244,9 +244,85 @@ pub fn process_profile_key(command: &str, install: &Install) -> Option<String> {
     Some(profile.unwrap_or_else(|| crate::data::normalize_key(&install.default_profile)))
 }
 
-/// Store package registration is per-user; the registry points at the versioned
-/// WindowsApps folder without needing to enumerate a protected directory.
+struct ComApartment(bool);
+
+impl ComApartment {
+    fn enter() -> windows::core::Result<Self> {
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        let result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        if result == windows::Win32::Foundation::RPC_E_CHANGED_MODE {
+            return Ok(Self(false));
+        }
+        result.ok()?;
+        Ok(Self(true))
+    }
+}
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe { windows::Win32::System::Com::CoUninitialize() };
+        }
+    }
+}
+
+// Use the current user's deployment registration, not leftover WindowsApps
+// directories. Store updates can leave an old executable present but disabled.
+fn registered_claude() -> windows::core::Result<Option<windows::ApplicationModel::Package>> {
+    let manager = windows::Management::Deployment::PackageManager::new()?;
+    let packages = manager.FindPackagesByUserSecurityId(&windows::core::HSTRING::new())?;
+    let mut best = None;
+    let mut best_version = (0, 0, 0, 0);
+    for package in packages {
+        let id = package.Id()?;
+        if id.Name()? != "Claude" {
+            continue;
+        }
+        let version = id.Version()?;
+        let key = (
+            version.Major,
+            version.Minor,
+            version.Build,
+            version.Revision,
+        );
+        if best.is_none() || key > best_version {
+            best_version = key;
+            best = Some(package);
+        }
+    }
+    Ok(best)
+}
+
+fn query_registered_install() -> windows::core::Result<Option<Install>> {
+    let _apartment = ComApartment::enter()?;
+    let Some(package) = registered_claude()? else {
+        return Ok(None);
+    };
+    let id = package.Id()?;
+    let version = id.Version()?;
+    let pfn = id.FamilyName()?.to_string();
+    let mut install = Install {
+        kind: InstallKind::Msix,
+        exe: PathBuf::from(package.InstalledLocation()?.Path()?.to_string())
+            .join("app")
+            .join("Claude.exe"),
+        version: format!(
+            "{}.{}.{}.{}",
+            version.Major, version.Minor, version.Build, version.Revision
+        ),
+        aumid: Some(format!("{pfn}!Claude")),
+        pfn: Some(pfn),
+        default_profile: PathBuf::new(),
+    };
+    install.refresh_identity();
+    Ok(Some(install))
+}
+
+/// Current registration takes precedence over readable but retired package paths.
 pub fn query_appx_install() -> Option<Install> {
+    if let Ok(Some(install)) = query_registered_install() {
+        return Some(install);
+    }
     let root = winreg::RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey_with_flags(APPX_PACKAGES, KEY_READ)
         .ok()?;
@@ -392,7 +468,12 @@ pub fn apply_window_style(dark: bool) {
         let style = style as u32 | WS_MINIMIZEBOX | WS_SYSMENU;
         SetWindowLongW(hwnd, GWL_STYLE, style as i32);
         let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        let ex = ex as u32 | WS_EX_APPWINDOW;
+        let ex = ex as u32;
+        let ex = if ex & WS_EX_TOOLWINDOW != 0 {
+            ex & !WS_EX_APPWINDOW
+        } else {
+            ex | WS_EX_APPWINDOW
+        };
         SetWindowLongW(hwnd, GWL_EXSTYLE, ex as i32);
         SetWindowPos(
             hwnd,
@@ -401,7 +482,7 @@ pub fn apply_window_style(dark: bool) {
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         );
 
         DwmSetWindowAttribute(
@@ -473,6 +554,26 @@ pub fn close_to_tray() -> bool {
 
 /// Undoes `close_to_tray`: restores the previous position, the taskbar button and focus.
 pub fn reopen_from_tray() -> bool {
+    restore_main_window(true)
+}
+
+pub fn show_main_window_without_focus() -> bool {
+    restore_main_window(false)
+}
+
+pub fn start_in_tray() -> bool {
+    if !close_to_tray() {
+        return false;
+    }
+    // Initial viewport creation is off-screen to avoid an on-screen flash.
+    // Its first manual reveal must restore a normal screen position.
+    if let Ok(mut pos) = CLOSED_POS.lock() {
+        *pos = Some((120, 60));
+    }
+    true
+}
+
+fn restore_main_window(activate: bool) -> bool {
     let hwnd = find_window_by_title(WINDOW_TITLE);
     if hwnd.is_null() {
         return false;
@@ -500,8 +601,10 @@ pub fn reopen_from_tray() -> bool {
             0,
             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         );
-        ShowWindow(hwnd, SW_SHOW);
-        SetForegroundWindow(hwnd);
+        ShowWindow(hwnd, if activate { SW_SHOW } else { SW_SHOWNOACTIVATE });
+        if activate {
+            SetForegroundWindow(hwnd);
+        }
     }
     true
 }
@@ -665,11 +768,8 @@ fn shell_execute(file: &OsStr, params: Option<&OsStr>, verb: Option<&str>, show:
 pub fn launch_default(install: &Install) -> Result<(), String> {
     if install.kind == InstallKind::Msix {
         if let Some(aumid) = install.aumid.as_deref().filter(|a| valid_aumid(a)) {
-            // Activate through the shell so the window keeps Store package identity.
-            let target = format!("shell:AppsFolder\\{aumid}");
-            if shell_execute(OsStr::new(&target), None, None, SW_SHOWNORMAL) {
-                return Ok(());
-            }
+            check_package_launchable(install)?;
+            return activate_default(aumid);
         }
     }
     if !install.available() {
@@ -678,11 +778,7 @@ pub fn launch_default(install: &Install) -> Result<(), String> {
             install.exe.display()
         ));
     }
-    if shell_execute(install.exe.as_os_str(), None, Some("open"), SW_SHOWNORMAL) {
-        Ok(())
-    } else {
-        Err("启动 Claude 失败。".into())
-    }
+    launch_executable(&install.exe, None)
 }
 
 pub fn launch_profile(install: &Install, path: &Path) -> Result<(), String> {
@@ -695,22 +791,77 @@ pub fn launch_profile(install: &Install, path: &Path) -> Result<(), String> {
             install.exe.display()
         ));
     }
+    check_package_launchable(install)?;
     std::fs::create_dir_all(path)
         .map_err(|e| format!("无法创建账号目录 '{}'：{e}", path.display()))?;
-    // A single quoted parameter, built from a validated local path. No shell syntax is
-    // evaluated; ShellExecuteW receives the executable and its parameters separately.
     let mut parameters = OsString::from("--user-data-dir=\"");
     parameters.push(path.as_os_str());
     parameters.push("\"");
-    if shell_execute(
-        install.exe.as_os_str(),
-        Some(&parameters),
-        Some("open"),
-        SW_SHOWNORMAL,
-    ) {
+    launch_executable(&install.exe, Some(&parameters))
+}
+
+fn launch_executable(exe: &Path, parameters: Option<&OsStr>) -> Result<(), String> {
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::UI::Shell::{
+        ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS,
+        SHELLEXECUTEINFOW,
+    };
+    let _apartment = ComApartment::enter().map_err(|error| error.to_string())?;
+    let file = to_wide(exe.as_os_str());
+    let args = parameters.map(to_wide);
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: w!("open"),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: args.as_ref().map_or(PCWSTR::null(), |a| PCWSTR(a.as_ptr())),
+        nShow: SW_SHOWNORMAL,
+        ..Default::default()
+    };
+    // Preserve the explicit normal show state while returning the real error
+    // instead of letting the shell display a second generic error dialog.
+    let result = unsafe { ShellExecuteExW(&mut info) };
+    if !info.hProcess.is_invalid() {
+        let _ = unsafe { windows::Win32::Foundation::CloseHandle(info.hProcess) };
+    }
+    result.map_err(|error| format!("启动 Claude 失败：{error}\n\n程序位置：{}", exe.display()))
+}
+
+fn activate_default(aumid: &str) -> Result<(), String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_LOCAL_SERVER};
+    use windows::Win32::UI::Shell::{
+        ApplicationActivationManager, IApplicationActivationManager, AO_NONE,
+    };
+    let activate = || -> windows::core::Result<()> {
+        let _apartment = ComApartment::enter()?;
+        let manager: IApplicationActivationManager =
+            unsafe { CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER)? };
+        let target = to_wide(OsStr::new(aumid));
+        unsafe { manager.ActivateApplication(PCWSTR(target.as_ptr()), PCWSTR::null(), AO_NONE)? };
         Ok(())
-    } else {
-        Err("启动 Claude 失败。".into())
+    };
+    activate().map_err(|error| {
+        format!("Windows 未能启动 Claude：{error}\n\n请确认 Claude 已完成更新并能从开始菜单打开。")
+    })
+}
+
+pub fn check_package_launchable(install: &Install) -> Result<(), String> {
+    if install.kind != InstallKind::Msix {
+        return Ok(());
+    }
+    let inspect = || -> windows::core::Result<bool> {
+        let _apartment = ComApartment::enter()?;
+        let Some(package) = registered_claude()? else {
+            return Ok(true);
+        };
+        let status = package.Status()?;
+        status.VerifyIsOK()
+    };
+    match inspect() {
+        Ok(false) => Err("Windows 报告 Claude 的安装状态异常，更新可能尚未完成。请先完成 Claude 更新，再重试。\n\n如果 Windows 提示服务“已标记为删除”（0x80070430），请保存工作后重启 Windows，然后完成更新。无需删除或重新添加账号。".into()),
+        // A failed status query must not block a healthy classic/Store launch.
+        _ => Ok(()),
     }
 }
 
@@ -734,7 +885,7 @@ pub fn open_file(path: &Path) -> io::Result<()> {
 
 /// Returns true when this process is the first instance. A second launch brings the
 /// existing window forward and returns false.
-pub fn single_instance() -> bool {
+pub fn single_instance(reveal: bool) -> bool {
     let name = to_wide(OsStr::new("Local\\ClaudeAccountSwitcher.Rust.3"));
     unsafe {
         let handle = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
@@ -742,7 +893,9 @@ pub fn single_instance() -> bool {
             return true;
         }
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            reveal_main_window();
+            if reveal {
+                reveal_main_window();
+            }
             CloseHandle(handle);
             return false;
         }
@@ -762,8 +915,23 @@ pub fn startup_enabled(exe: &Path) -> bool {
         .ok();
     let Some(key) = key else { return false };
     let value: String = key.get_value(STARTUP_VALUE).unwrap_or_default();
-    let value = value.trim().trim_matches('"');
-    value.eq_ignore_ascii_case(&exe.to_string_lossy())
+    startup_matches(&value, exe)
+}
+
+fn startup_matches(value: &str, exe: &Path) -> bool {
+    // Accept the previous quoted/unquoted command so enabled installations
+    // migrate to background startup without changing the user's enabled state.
+    if value.trim().is_empty() {
+        return false;
+    }
+    if value.trim().eq_ignore_ascii_case(&exe.to_string_lossy()) {
+        return true;
+    }
+    let Some(args) = command_line_args(value.trim()) else {
+        return false;
+    };
+    let valid_args = args.len() == 1 || (args.len() == 2 && args[1] == "--background");
+    valid_args && crate::data::normalize_key(Path::new(&args[0])) == crate::data::normalize_key(exe)
 }
 
 pub fn set_startup(enable: bool, exe: &Path) -> io::Result<()> {
@@ -772,7 +940,7 @@ pub fn set_startup(enable: bool, exe: &Path) -> io::Result<()> {
         .map_err(|e| io::Error::other(e.to_string()))?
         .0;
     if enable {
-        let value = format!("\"{}\"", exe.display());
+        let value = format!("\"{}\" --background", exe.display());
         key.set_value(STARTUP_VALUE, &value)
             .map_err(|e| io::Error::other(e.to_string()))?;
     } else {
@@ -839,6 +1007,27 @@ pub fn current_exe() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn startup_recognizes_migration_and_rejects_unrelated_commands() {
+        let exe = Path::new(r"C:\Portable Apps\Claude Account Switcher.exe");
+        for command in [
+            r"C:\Portable Apps\Claude Account Switcher.exe",
+            r#""C:\Portable Apps\Claude Account Switcher.exe""#,
+            r#""C:\Portable Apps\Claude Account Switcher.exe" --background"#,
+            r#"  "c:\portable apps\CLAUDE ACCOUNT SWITCHER.EXE" --background  "#,
+        ] {
+            assert!(startup_matches(command, exe), "{command}");
+        }
+        for command in [
+            "",
+            " ",
+            r#""C:\Other.exe" --background"#,
+            r#""C:\Portable Apps\Claude Account Switcher.exe" --dump"#,
+            r#""C:\Portable Apps\Claude Account Switcher.exe" --background --dump"#,
+        ] {
+            assert!(!startup_matches(command, exe), "{command}");
+        }
+    }
     use super::*;
 
     fn install() -> Install {
@@ -950,4 +1139,19 @@ mod tests {
             assert!(!valid_aumid(value), "{value:?}");
         }
     }
+}
+#[test]
+fn failed_executable_launch_returns_native_error() {
+    let dir = crate::test_support::TestDir::new();
+    let missing = dir.path().join("missing.exe");
+    let error = launch_executable(&missing, None).unwrap_err();
+    assert!(error.contains("启动 Claude 失败"));
+    assert!(error.contains(&missing.display().to_string()));
+    assert!(!missing.exists());
+}
+
+#[test]
+fn unregistered_default_app_does_not_report_a_successful_launch() {
+    let error = activate_default("CodexSwitcherMissing_0000000000000!Missing").unwrap_err();
+    assert!(error.contains("Windows 未能启动 Claude"));
 }

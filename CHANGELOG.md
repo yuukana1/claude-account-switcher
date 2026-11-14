@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.2.2 — Unreleased
+
+- Start silently in the notification area at sign-in. Migrate existing enabled Run entries to `--background`, keep manual opening unchanged, and do not focus an existing window on a second background invocation. Restore a visible window without focus if tray creation fails.
+- Resolve the current user's registered Store package before launching, even when an old executable still exists after an update. Preserve existing profile paths.
+- Report unhealthy Store package status and Windows activation errors instead of treating a shell request as a successful default-account launch. Preserve explicit window visibility and include native errors for secondary profiles.
+- Add a read-only `--diagnose-install` command to inspect package discovery and health without reading account contents.
+
 ## 3.2.1 — 2026-11-11
 
 - Check the latest stable release using its public `update.json` attachment so shared GitHub API rate limits do not block daily or manual checks. Keep the API as a fallback and continue verifying the download's size and SHA-256.

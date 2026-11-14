@@ -103,10 +103,17 @@ pub fn paths() -> Paths {
 // --------------------------------------------------------------- install ----
 
 pub fn discover_install(cached: Option<Install>) -> Install {
+    discover_install_with(cached, crate::win::query_appx_install)
+}
+
+fn discover_install_with(
+    cached: Option<Install>,
+    registered: impl FnOnce() -> Option<Install>,
+) -> Install {
     let mut stale: Option<Install> = None;
     if let Some(mut install) = cached {
         install.refresh_identity();
-        if install.available() {
+        if install.kind == InstallKind::Classic && install.available() {
             return install;
         }
         stale = Some(install);
@@ -115,7 +122,7 @@ pub fn discover_install(cached: Option<Install>) -> Install {
     // Ask the per-user package repository first: `C:\Program Files\WindowsApps` cannot be
     // listed by a normal process, so after a Store update moved Claude to a new versioned
     // folder the directory scan below sees nothing and the old cached path is all we have.
-    if let Some(install) = crate::win::query_appx_install() {
+    if let Some(install) = registered() {
         return install;
     }
     if let Some(install) = find_msix() {
@@ -1224,6 +1231,33 @@ mod tests {
     use crate::test_support::TestDir;
     use chrono::Duration;
     use serde_json::json;
+
+    #[test]
+    fn registered_update_wins_even_when_old_store_executable_still_exists() {
+        let dir = TestDir::new();
+        let old_exe = dir.path().join("old.exe");
+        let new_exe = dir.path().join("new.exe");
+        fs::write(&old_exe, b"old package still on disk").unwrap();
+        fs::write(&new_exe, b"current registration").unwrap();
+        let cached = Install {
+            kind: InstallKind::Msix,
+            exe: old_exe,
+            version: "5.11492.2.0".into(),
+            aumid: Some("Claude_pzs8sxrjxfjjc!Claude".into()),
+            pfn: Some("Claude_pzs8sxrjxfjjc".into()),
+            default_profile: dir.path().join("existing-profile"),
+        };
+        let current = Install {
+            exe: new_exe.clone(),
+            version: "5.11492.5.0".into(),
+            ..cached.clone()
+        };
+        let resolved = discover_install_with(Some(cached.clone()), || Some(current));
+        assert_eq!(resolved.exe, new_exe);
+        assert_eq!(resolved.version, "5.11492.5.0");
+        assert_eq!(resolved.default_profile, cached.default_profile);
+        assert_eq!(resolved.aumid, cached.aumid);
+    }
 
     fn account_at(path: PathBuf) -> Account {
         Account {

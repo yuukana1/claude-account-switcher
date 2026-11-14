@@ -41,6 +41,16 @@ fn main() -> eframe::Result<()> {
         }
         return Ok(());
     }
+    if command.as_deref() == Some(std::ffi::OsStr::new("--diagnose-install")) {
+        let install = data::discover_install(None);
+        println!("version: {}", install.version);
+        println!("executable: {}", install.exe.display());
+        match win::check_package_launchable(&install) {
+            Ok(()) => println!("package status: OK or unavailable"),
+            Err(problem) => println!("package status: {problem}"),
+        }
+        return Ok(());
+    }
     if command.as_deref() == Some(std::ffi::OsStr::new("--await-update")) {
         let pid = args.next().and_then(|p| p.to_str()?.parse().ok());
         if !pid.is_some_and(|p| update::install::await_parent(p).is_ok()) {
@@ -52,7 +62,9 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    if !win::single_instance() {
+    let background = command.as_deref() == Some(std::ffi::OsStr::new("--background"))
+        || args.any(|arg| arg == "--background");
+    if !win::single_instance(!background) {
         return Ok(());
     }
 
@@ -66,7 +78,13 @@ fn main() -> eframe::Result<()> {
             .with_resizable(false)
             .with_decorations(false)
             .with_transparent(false)
-            .with_position([120.0, 60.0])
+            .with_position(if background {
+                [-32000.0, -32000.0]
+            } else {
+                [120.0, 60.0]
+            })
+            .with_active(!background)
+            .with_taskbar(!background)
             .with_icon(std::sync::Arc::new(icon)),
         renderer: eframe::Renderer::Glow,
         ..Default::default()
@@ -75,7 +93,7 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Claude 账号切换器",
         options,
-        Box::new(|cc| Ok(Box::new(app::SwitcherApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(app::SwitcherApp::new(cc, background)))),
     )
 }
 

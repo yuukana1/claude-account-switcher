@@ -1,6 +1,6 @@
 [package]
 name = "claude-account-switcher"
-version = "3.2.1"
+version = "3.2.2"
 edition = "2021"
 description = "Portable Claude account switcher for Windows"
 build = "build.rs"
@@ -34,8 +34,12 @@ winreg = "0.55"
 sha2 = "0.10"
 ab_glyph = "0.2"
 windows = { version = "0.62.2", features = [
+    "ApplicationModel",
+    "Management_Deployment",
+    "Storage_Search",
     "Win32_Foundation",
     "Win32_System_Com",
+    "Win32_System_Registry",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
     "Win32_UI_Shell",

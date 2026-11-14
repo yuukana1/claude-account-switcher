@@ -121,7 +121,7 @@ impl SwitcherApp {
         let _ = menu.append(&MenuItem::with_id("updates", updates, true, None));
         let _ = menu.append(&CheckMenuItem::with_id(
             "startup",
-            "开机自动启动",
+            "开机静默启动",
             true,
             self.startup,
             None,
